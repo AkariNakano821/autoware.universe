@@ -1492,10 +1492,12 @@ BehaviorModuleOutput GoalPlannerModule::planPullOverAsOutput()
     return getPreviousModuleOutput();
   }
 
+  const bool is_freespace =
+    thread_safe_data_.getPullOverPlannerType() == PullOverPlannerType::FREESPACE;
   if (
-    hasNotDecidedPath(
-      planner_data_, occupancy_grid_map_, *parameters_, ego_predicted_path_params_,
-      objects_filtering_params_, safety_check_params_, goal_searcher_) &&
+    path_decision_controller_.get_current_state().state ==
+      PathDecisionState::DecisionKind::NOT_DECIDED &&
+    !is_freespace &&
     needPathUpdate(
       planner_data_->self_odometry->pose.pose, 1.0 /*path_update_duration*/, *parameters_)) {
     // if the final path is not decided and enough time has passed since last path update,
@@ -1539,9 +1541,7 @@ BehaviorModuleOutput GoalPlannerModule::planPullOverAsOutput()
   setOutput(output);
 
   // return to lane parking if it is possible
-  if (
-    thread_safe_data_.getPullOverPlannerType() == PullOverPlannerType::FREESPACE &&
-    canReturnToLaneParking()) {
+  if (is_freespace && canReturnToLaneParking(context_data)) {
     thread_safe_data_.set_pull_over_path(thread_safe_data_.get_lane_parking_pull_over_path());
   }
 
