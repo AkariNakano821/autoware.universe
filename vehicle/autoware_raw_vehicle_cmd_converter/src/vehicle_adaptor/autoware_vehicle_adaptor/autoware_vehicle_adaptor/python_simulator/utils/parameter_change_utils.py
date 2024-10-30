@@ -178,6 +178,10 @@ class ChangeParam(Enum):
     adaptive_gear_ratio_coef_control_obs = ("adaptive_gear_ratio_coef_control_obs", adaptive_gear_ratio_coef)
     adaptive_gear_ratio_coef_sim_obs = ("adaptive_gear_ratio_coef_sim_obs", adaptive_gear_ratio_coef)
 
+    acc_noise = ("acc_noise", [0.0, 0.02, 0.04, 0.06, 0.08, 0.1])
+    acc_smoothing_constant = ("acc_smoothing_constant", [0.9])
+     
+
     def __init__(self, id : str, val: list[Any]):
         self.id = id
         self.val = val

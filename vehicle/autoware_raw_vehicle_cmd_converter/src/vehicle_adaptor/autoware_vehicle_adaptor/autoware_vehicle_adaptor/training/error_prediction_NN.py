@@ -9,8 +9,6 @@ prediction_step = 3
 class ErrorPredictionNN(nn.Module):
     def __init__(
         self,
-        states_size,
-        vel_index,
         output_size,
         prediction_length,
         num_layers_encoder=1,
@@ -26,23 +24,23 @@ class ErrorPredictionNN(nn.Module):
         vel_bias=0.0,
     ):
         super(ErrorPredictionNN, self).__init__()
-        acc_index = states_size - 2
-        steer_index = states_size - 1
-        self.states_size = states_size
-        self.vel_index = vel_index
+        self.states_size = 3 # vel, acc, steer
+        self.vel_index = 0
+        self.acc_index = 1
+        self.steer_index = 2
         self.vel_scaling = vel_scaling
         self.vel_bias = vel_bias
         self.lstm_hidden_size = lstm_hidden_size
         self.lstm_acc_hidden_size = lstm_acc_hidden_size
         self.lstm_steer_hidden_size = lstm_steer_hidden_size
         self.num_layers_encoder = num_layers_encoder
-        acc_input_indices = np.arange(states_size, states_size + acc_queue_size + prediction_step)
+        acc_input_indices = np.arange(self.states_size, self.states_size + acc_queue_size + prediction_step)
         steer_input_indices = np.arange(
-            states_size + acc_queue_size + prediction_step, states_size + acc_queue_size + steer_queue_size + 2 * prediction_step
+            self.states_size + acc_queue_size + prediction_step, self.states_size + acc_queue_size + steer_queue_size + 2 * prediction_step
         )
-        self.acc_layer_input_indices = np.concatenate(([vel_index, acc_index], acc_input_indices))
+        self.acc_layer_input_indices = np.concatenate(([self.vel_index, self.acc_index], acc_input_indices))
         self.steer_layer_input_indices = np.concatenate(
-            ([vel_index, steer_index], steer_input_indices)
+            ([self.vel_index, self.steer_index], steer_input_indices)
         )
         self.prediction_length = prediction_length
         lb = -randomize
@@ -70,7 +68,7 @@ class ErrorPredictionNN(nn.Module):
         nn.init.uniform_(self.steer_encoder_layer_2[0].weight, a=lb, b=ub)
         nn.init.uniform_(self.steer_encoder_layer_2[0].bias, a=lb, b=ub)
 
-        combined_input_size = states_size - 2 + acc_hidden_sizes[1] + steer_hidden_sizes[1]
+        combined_input_size = 1 + acc_hidden_sizes[1] + steer_hidden_sizes[1]
         self.lstm_encoder = nn.LSTM(combined_input_size + 2, lstm_hidden_size + lstm_acc_hidden_size + lstm_steer_hidden_size, num_layers=num_layers_encoder, batch_first=True)
         nn.init.uniform_(self.lstm_encoder.weight_hh_l0, a=lb, b=ub)
         nn.init.uniform_(self.lstm_encoder.weight_ih_l0, a=lb, b=ub)

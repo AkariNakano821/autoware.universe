@@ -53,7 +53,7 @@ class PythonSimulator:
         self.sim_dt = 0.0033
         self.control_step = 10
         self.max_control_time = 100.0
-        self.acc_noise = 0.12
+        self.acc_noise = 0.08
         self.acc_smoothing_constant = 0.9
 
 
@@ -390,6 +390,7 @@ class PythonSimulator:
         t_current = 0.0
         simulation_num = 0
         prev_acc_obs = None
+        prev_vel_obs = None
         while True:
             # steer_wheel_obs = steer_to_steer_wheel(states_for_controller[vel_index], states_for_controller[steer_index], self.adaptive_gear_ratio_coef_sim_obs)
             agr_obs_sim = get_adaptive_gear_ratio_by_steer(self.states_current[vel_index], self.states_current[steer_index], self.adaptive_gear_ratio_coef_sim_obs)
@@ -400,10 +401,13 @@ class PythonSimulator:
                     agr_obs_control = get_adaptive_gear_ratio_by_steer_wheel(states_for_controller[vel_index], steer_wheel_obs, self.adaptive_gear_ratio_coef_control_obs)
                     states_for_controller[steer_index] = steer_wheel_obs / agr_obs_control
                     # states_for_controller[steer_index] = steer_wheel_to_steer(states_for_controller[vel_index], steer_wheel_obs, self.adaptive_gear_ratio_coef_control_obs)
-                states_for_controller[acc_index] += self.acc_noise * np.random.randn()
+                np.random.seed()
+                states_for_controller[vel_index] += np.sqrt(0.5) * self.acc_noise * np.random.randn() * self.sim_dt * self.control_step
                 if prev_acc_obs is not None:
-                    states_for_controller[acc_index] = self.acc_smoothing_constant * prev_acc_obs + (1.0 - self.acc_smoothing_constant) * states_for_controller[acc_index]
+                    raw_acc = (states_for_controller[vel_index] - prev_vel_obs) / (self.sim_dt * self.control_step)
+                    states_for_controller[acc_index] = self.acc_smoothing_constant * prev_acc_obs + (1.0 - self.acc_smoothing_constant) * raw_acc
                 prev_acc_obs = states_for_controller[acc_index]
+                prev_vel_obs = states_for_controller[vel_index]
                 if control_type == ControlType.mpc:
                     X_des, U_des, tracking_error, break_flag = self.get_mpc_trajectory(
                         t_current, states_for_controller

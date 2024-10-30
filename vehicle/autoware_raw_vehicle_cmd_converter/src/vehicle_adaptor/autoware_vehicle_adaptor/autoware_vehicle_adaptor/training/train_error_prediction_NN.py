@@ -157,7 +157,7 @@ def get_loss(criterion, model, X_batch, Y, Z, adaptive_weight,tanh_gain = 10, ta
     total_loss = loss + first_order_loss + second_order_loss
     return total_loss
 
-def validate_in_batches(model, criterion, X_val, Y_val, Z_val, adaptive_weight, randomize_previous_error=[0.03,0.03],batch_size=10000,alpha_jacobian=None,calc_jacobian_len=10,eps=1e-5):
+def validate_in_batches(model, criterion, X_val, Y_val, Z_val, adaptive_weight, randomize_previous_error=[0.03,0.03],batch_size=3000,alpha_jacobian=None,calc_jacobian_len=10,eps=1e-5):
     model.eval()
     val_loss = 0.0
     num_batches = (X_val.size(0) + batch_size - 1) // batch_size
@@ -176,7 +176,7 @@ def validate_in_batches(model, criterion, X_val, Y_val, Z_val, adaptive_weight, 
     
     val_loss /= X_val.size(0)
     return val_loss
-def get_each_component_loss(model, X_val, Y_val,tanh_gain = 10, tanh_weight = 0.1, first_order_weight = 0.01, second_order_weight = 0.01, batch_size=10000, window_size=10):
+def get_each_component_loss(model, X_val, Y_val,tanh_gain = 10, tanh_weight = 0.1, first_order_weight = 0.01, second_order_weight = 0.01, batch_size=3000, window_size=10):
     model.eval()
     val_loss = np.zeros(Y_val.size(2))
     tanh_loss = 0.0
@@ -240,17 +240,23 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         Y_val: torch.Tensor,
         Z_val: torch.Tensor,
         fix_lstm: bool = False,
-        integration_prob: float = 0.1
+        randomize_fix_lstm: float = 0.001,
+        integration_prob: float = 0.1,
+        X_replay: torch.Tensor = None,
+        Y_replay: torch.Tensor = None,
+        Z_replay: torch.Tensor = None,
+        replay_data_rate: float = 0.05,
     ):
         """Train the error prediction NN."""
 
+        model = model.to(self.device)
         print("sample_size: ", X_train.shape[0] + X_val.shape[0])
         print("patience: ", patience)
         # Define the loss function.
         criterion = nn.L1Loss()
         # Fix the LSTM
         if fix_lstm:
-            self.fix_lstm(model)
+            self.fix_lstm(model,randomize=randomize_fix_lstm)
         # save the original adaptive weight
         original_adaptive_weight = self.adaptive_weight.clone()
         print("original_adaptive_weight: ", original_adaptive_weight)
@@ -289,6 +295,12 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
                 loss = get_loss(criterion, model, X_batch, Y_batch,Z_batch, adaptive_weight=self.adaptive_weight,integral_prob=integration_prob,alpha_jacobian=self.alpha_jacobian)
                 for w in model.parameters():
                     loss += self.alpha_1 * torch.norm(w, 1) + self.alpha_2 * torch.norm(w, 2) ** 2
+                if X_replay is not None:
+                    replay_mask = torch.rand(X_replay.size(0)) < replay_data_rate * X_train.size(0) / X_replay.size(0)
+                    X_replay_batch = X_replay[replay_mask]
+                    Y_replay_batch = Y_replay[replay_mask]
+                    Z_replay_batch = Z_replay[replay_mask]
+                    loss += get_loss(criterion, model, X_replay_batch, Y_replay_batch,Z_replay_batch, adaptive_weight=self.adaptive_weight,integral_prob=integration_prob,alpha_jacobian=self.alpha_jacobian)
                 loss.backward()
                 optimizer.step()
             model.eval()
@@ -335,14 +347,21 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         Y_val: torch.Tensor,
         Z_val: torch.Tensor,
         fix_lstm: bool = False,
+        randomize_fix_lstm: float = 0.001,
         integration_prob: float = 0.1,
         randomize: float = 0.001,
+        reset_weight: bool = False,
         X_test=None,
         Y_test=None,
         Z_test=None,
+        X_replay=None,
+        Y_replay=None,
+        Z_replay=None,
+        replay_data_rate=0.05,
         plt_save_dir=None,
         window_size=10,
         save_path=None,
+        always_update_model=False,
     ):
         print("randomize: ", randomize)
         self.update_adaptive_weight(model,X_train,Y_train)
@@ -355,20 +374,23 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         if X_test is not None:
             original_test_loss = validate_in_batches(model,criterion,X_test, Y_test, Z_test, adaptive_weight=original_adaptive_weight)
             original_each_component_test_loss, Y_test_pred_origin = get_each_component_loss(model, X_test, Y_test)
-        relearned_model = copy.deepcopy(model)
-        relearned_model.lstm_encoder.flatten_parameters()
-        relearned_model.lstm.flatten_parameters()
-        with torch.no_grad():
-            if fix_lstm:
-                relearned_model.complimentary_layer[0].weight += randomize * torch.randn_like(model.complimentary_layer[0].weight)
-                relearned_model.complimentary_layer[0].bias += randomize * torch.randn_like(model.complimentary_layer[0].bias)
-                relearned_model.linear_relu[0].weight += randomize * torch.randn_like(model.linear_relu[0].weight)
-                relearned_model.linear_relu[0].bias += randomize * torch.randn_like(model.linear_relu[0].bias)
-                relearned_model.final_layer.weight += randomize * torch.randn_like(model.final_layer.weight)
-                relearned_model.final_layer.bias += randomize * torch.randn_like(model.final_layer.bias)
-            else:
-                for w in relearned_model.parameters():
-                    w += randomize * torch.randn_like(w)
+        if reset_weight:
+            relearned_model = error_prediction_NN.ErrorPredictionNN(output_size=len(state_component_predicted_index), prediction_length=prediction_length).to(self.device)
+        else:
+            relearned_model = copy.deepcopy(model)
+            relearned_model.lstm_encoder.flatten_parameters()
+            relearned_model.lstm.flatten_parameters()
+            with torch.no_grad():
+                if fix_lstm:
+                    relearned_model.complimentary_layer[0].weight += randomize * torch.randn_like(model.complimentary_layer[0].weight)
+                    relearned_model.complimentary_layer[0].bias += randomize * torch.randn_like(model.complimentary_layer[0].bias)
+                    relearned_model.linear_relu[0].weight += randomize * torch.randn_like(model.linear_relu[0].weight)
+                    relearned_model.linear_relu[0].bias += randomize * torch.randn_like(model.linear_relu[0].bias)
+                    relearned_model.final_layer.weight += randomize * torch.randn_like(model.final_layer.weight)
+                    relearned_model.final_layer.bias += randomize * torch.randn_like(model.final_layer.bias)
+                else:
+                    for w in relearned_model.parameters():
+                        w += randomize * torch.randn_like(w)
         self.train_model(
             relearned_model,
             X_train,
@@ -381,7 +403,12 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             Y_val,
             Z_val,
             fix_lstm=fix_lstm,
+            randomize_fix_lstm=randomize_fix_lstm,
             integration_prob=integration_prob,
+            X_replay=X_replay,
+            Y_replay=Y_replay,
+            Z_replay=Z_replay,
+            replay_data_rate=replay_data_rate,
         )
         relearned_train_loss = validate_in_batches(relearned_model,criterion,X_train, Y_train, Z_train, adaptive_weight=original_adaptive_weight)
         relearned_each_component_train_loss, Y_train_pred_relearned = get_each_component_loss(relearned_model, X_train, Y_train,window_size=window_size)
@@ -526,7 +553,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             plt.close()
         if save_path is not None:
             self.save_given_model(relearned_model, save_path)
-        if relearned_val_loss < original_val_loss:
+        if relearned_val_loss < original_val_loss or always_update_model:
             return relearned_model, True
         else:
             return model, False
@@ -537,7 +564,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
         X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         self.model = error_prediction_NN.ErrorPredictionNN(
-            states_size=3, vel_index=0, output_size=len(state_component_predicted_index), prediction_length=prediction_length
+            output_size=len(state_component_predicted_index), prediction_length=prediction_length
         ).to(self.device)
         self.update_adaptive_weight(None,torch.tensor(X_train_np, dtype=torch.float32, device=self.device),torch.tensor(Y_train_np, dtype=torch.float32, device=self.device))
         self.train_model(
@@ -552,7 +579,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             torch.tensor(Y_val_np, dtype=torch.float32, device=self.device),
             torch.tensor(Z_val_np, dtype=torch.float32, device=self.device),
         )
-    def get_relearned_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100], randomize=0.001,plt_save_dir=None,save_path=None):
+    def get_relearned_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100],reset_weight=False, randomize=0.001,plt_save_dir=None,save_path=None, use_replay_data=False, replay_data_rate=0.05, always_update_model=False):
         self.model.to(self.device)
         # Define Time Series Data
         X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
@@ -566,6 +593,15 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             X_test = None
             Y_test = None
             Z_test = None
+        if use_replay_data and len(self.X_replay_list) > 0:
+            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
+            Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
+            Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
+        else:
+            X_replay = None
+            Y_replay = None
+            Z_replay = None
             
         self.model, updated = self.relearn_model(
             self.model,
@@ -582,18 +618,109 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             X_test=X_test,
             Y_test=Y_test,
             Z_test=Z_test,
+            reset_weight=reset_weight,
+            X_replay=X_replay,
+            Y_replay=Y_replay,
+            Z_replay=Z_replay,
+            replay_data_rate=replay_data_rate,
             plt_save_dir=plt_save_dir,
-            save_path=save_path
+            save_path=save_path,
+            always_update_model=always_update_model
         )
         return updated
-
+    def initialize_ensemble_models(self):
+        self.models = [self.model]
+    def get_updated_temp_model(self,learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100], use_replay_data=False, replay_data_rate=0.05,randomize_fix_lstm=0.0):
+        self.temp_model = copy.deepcopy(self.model)
+        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
+        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        if use_replay_data and len(self.X_replay_list) > 0:
+            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
+            Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
+            Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
+        else:
+            X_replay = None
+            Y_replay = None
+            Z_replay = None
+        self.temp_model.to(self.device)
+        self.update_adaptive_weight(self.temp_model,torch.tensor(X_train_np, dtype=torch.float32, device=self.device),torch.tensor(Y_train_np, dtype=torch.float32, device=self.device))
+        self.train_model(self.temp_model,
+            torch.tensor(X_train_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Y_train_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Z_train_np, dtype=torch.float32, device=self.device),
+            batch_sizes,
+            learning_rates,
+            patience,
+            torch.tensor(X_val_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Y_val_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Z_val_np, dtype=torch.float32, device=self.device),
+            fix_lstm=True,
+            randomize_fix_lstm=randomize_fix_lstm,
+            X_replay=X_replay,
+            Y_replay=Y_replay,
+            Z_replay=Z_replay,
+            replay_data_rate=replay_data_rate
+        )
+    def relearn_temp_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100], randomize=0.001,plt_save_dir=None,save_path=None, use_replay_data=False, replay_data_rate=0.05,randomize_fix_lstm=0.0):
+        self.temp_model.to(self.device)
+        # Define Time Series Data
+        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        if len(self.X_test_list) > 0:
+            X_test_np, Y_test_np, Z_test_np = self.get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
+            X_test = torch.tensor(X_test_np, dtype=torch.float32, device=self.device)
+            Y_test = torch.tensor(Y_test_np, dtype=torch.float32, device=self.device)
+            Z_test = torch.tensor(Z_test_np, dtype=torch.float32, device=self.device)
+        else:
+            X_test = None
+            Y_test = None
+            Z_test = None
+        if use_replay_data and len(self.X_replay_list) > 0:
+            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
+            Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
+            Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
+        else:
+            X_replay = None
+            Y_replay = None
+            Z_replay = None
+            
+            
+        self.temp_model, updated = self.relearn_model(
+            self.temp_model,
+            torch.tensor(X_train_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Y_train_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Z_train_np, dtype=torch.float32, device=self.device),
+            batch_sizes,
+            learning_rates,
+            patience,
+            torch.tensor(X_val_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Y_val_np, dtype=torch.float32, device=self.device),
+            torch.tensor(Z_val_np, dtype=torch.float32, device=self.device),
+            randomize=randomize,
+            X_test=X_test,
+            Y_test=Y_test,
+            Z_test=Z_test,
+            X_replay=X_replay,
+            Y_replay=Y_replay,
+            Z_replay=Z_replay,
+            replay_data_rate=replay_data_rate,
+            plt_save_dir=plt_save_dir,
+            save_path=save_path,
+            fix_lstm=True,
+            randomize_fix_lstm=randomize_fix_lstm
+        )
+        return updated
+    def add_temp_model_to_ensemble(self):
+        self.models.append(self.temp_model)
     def get_trained_ensemble_models(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100], ensemble_size=5):
         print("state_component_predicted: ", state_component_predicted)
         # Define Time Series Data
         X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
         X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         self.model = error_prediction_NN.ErrorPredictionNN(
-            states_size=3, vel_index=0, output_size=len(state_component_predicted_index), prediction_length=prediction_length
+            output_size=len(state_component_predicted_index), prediction_length=prediction_length
         ).to(self.device)
         print("______________________________")
         print("ensemble number: ", 0)
@@ -648,9 +775,9 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             torch.tensor(Y_val_np, dtype=torch.float32, device=self.device),
             torch.tensor(Z_val_np, dtype=torch.float32, device=self.device),
         )
-    def get_sequence_data(self, X, Y, Z, division_indices, acc_threshold=2.0, steer_threshold=0.7, acc_change_threshold=1.5, steer_change_threshold=0.8, acc_change_window=10, steer_change_window=10):
+    def get_sequence_data(self, X, Y, Z, division_indices, acc_threshold=2.0, steer_threshold=0.7, acc_change_threshold=3.5, steer_change_threshold=0.8, acc_change_window=10, steer_change_window=10):
         X_seq = transform_to_sequence_data(
-            np.array(X)[:, 3:],
+            np.array(X),
             past_length + prediction_length,
             division_indices,
             prediction_step,
@@ -907,7 +1034,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         return result_dict
         
 
-    def get_acc_steer_prediction(self,model,X,Y,window_size=10,batch_size=10000):
+    def get_acc_steer_prediction(self,model,X,Y,window_size=10,batch_size=3000):
         model.eval()
         model.to("cpu")
         num_batches = (X.size(0) + batch_size - 1) // batch_size
@@ -1056,7 +1183,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         np.savetxt(save_dir + "/YXT.csv",YXT,delimiter=",")
 
     """
-    def get_linear_regression_matrices(self,save_dir, batch_size=10000,mode="single_model"):
+    def get_linear_regression_matrices(self,save_dir, batch_size=3000,mode="single_model"):
         speed_threshold = 6.0
         steer_threshold = 0.05
         acc_threshold = 0.1
@@ -1157,7 +1284,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         projection_dim = max(2,min(np.where(cumulative_ratio > 1 - max_cumulative_error)[0][0] + 1, max_projection_dim))
         P = VT[:projection_dim]
         np.savetxt(save_dir + "/Projection.csv", P, delimiter=",")
-    def update_adaptive_weight(self,model, X, Y, batch_size=10000):
+    def update_adaptive_weight(self,model, X, Y, batch_size=3000):
         if model is not None:
             model.to(self.device)
             model.eval()

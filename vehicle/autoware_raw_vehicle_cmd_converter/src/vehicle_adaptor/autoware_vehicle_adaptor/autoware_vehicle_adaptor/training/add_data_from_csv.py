@@ -74,9 +74,13 @@ class add_data_from_csv:
         self.X_test_list = []
         self.Y_test_list = []
         self.Z_test_list = []
+        self.X_replay_list = []
+        self.Y_replay_list = []
+        self.Z_replay_list = []
         self.division_indices_train = []
         self.division_indices_val = []
         self.division_indices_test = []
+        self.division_indices_replay = []
         self.nominal_dynamics = utils.NominalDynamics()
         self.nominal_dynamics.set_params(
             wheel_base,
@@ -99,10 +103,14 @@ class add_data_from_csv:
         self.X_test_list = []
         self.Y_test_list = []
         self.Z_test_list = []
+        self.X_replay_list = []
+        self.Y_replay_list = []
+        self.Z_replay_list = []
         self.division_indices_train = []
         self.division_indices_val = []
         self.division_indices_test = []
-    def add_data_from_csv(self, dir_name: str, add_mode="divide",map_dir=None,control_cmd_mode=None) -> None:
+        self.division_indices_replay = []
+    def add_data_from_csv(self, dir_name: str, add_mode="divide",map_dir=None,control_cmd_mode=None,reverse_steer=False) -> None:
         localization_kinematic_state = np.loadtxt(
             dir_name + "/localization_kinematic_state.csv", delimiter=",", usecols=[0, 1, 4, 5, 7, 8, 9, 10, 47]
         )
@@ -270,28 +278,36 @@ class add_data_from_csv:
         Z_list = []
         TimeStamp_list = []
 
-        for i in range(max(acc_queue_size, steer_queue_size) + 1, States.shape[0] - predict_step - 1):
+        for i in range(max(acc_queue_size, steer_queue_size), States.shape[0] - predict_step - 1):
             acc_input_queue = Inputs[i - acc_queue_size : i + predict_step, 0]
             steer_input_queue = Inputs[i - steer_queue_size : i + predict_step, 1]
-            state_old = States[i - 1]
             state = States[i]
             state_obs = States[i + predict_step]
-            x_dot = (state[x_index] - state_old[x_index]) / control_dt
-            y_dot = (state[y_index] - state_old[y_index]) / control_dt
-            yaw_dot = (state[yaw_index] - state_old[yaw_index]) / control_dt
-            dot_info = np.array([x_dot, y_dot, yaw_dot])
-            dot_info = utils.rotate_data(dot_info, state[yaw_index])
             TimeStamp_list.append(TimeStamps[i])
-            X_list.append(
-                np.concatenate(
-                    (
-                        dot_info,
-                        state[[vel_index, acc_index, steer_index]],
-                        acc_input_queue,
-                        steer_input_queue,
+            reverse_state = state.copy()
+            reverse_state[yaw_index] = -reverse_state[yaw_index]
+            reverse_state[steer_index] = -reverse_state[steer_index]
+            if not reverse_steer:
+                X_list.append(
+                    np.concatenate(
+                        (
+                            state[[vel_index, acc_index, steer_index]],
+                            acc_input_queue,
+                            steer_input_queue,
+                        )
                     )
                 )
-            )
+            else:
+                X_list.append(
+                    np.concatenate(
+                        (
+                            reverse_state[[vel_index, acc_index, steer_index]],
+                            acc_input_queue,
+                            -steer_input_queue,
+                        )
+                    )
+                )
+
             u_for_predict_nom = np.zeros((predict_step, 2))
             u_for_predict_nom[:, 0] = acc_input_queue[
                 acc_input_queue.shape[0] - acc_delay_step - predict_step : acc_input_queue.shape[0] - acc_delay_step
@@ -318,10 +334,16 @@ class add_data_from_csv:
                 predict_error[vel_index] = pseudo_predict_error[vel_index]
             if not parameters.use_yaw_observation:
                 predict_error[yaw_index] = pseudo_predict_error[yaw_index]
-
             predict_error = utils.rotate_data(predict_error, state[yaw_index])
+            if reverse_steer:
+                predict_error[y_index] = -predict_error[y_index]
+                predict_error[yaw_index] = -predict_error[yaw_index]
+                predict_error[steer_index] = -predict_error[steer_index]
             Y_list.append(predict_error / predict_dt)
-            Z_list.append(state)
+            if not reverse_steer:
+                Z_list.append(state)
+            else:
+                Z_list.append(reverse_state)
 
         Y_smooth = np.array(Y_list)
         Y_smooth[:, x_index] = data_smoothing(Y_smooth[:, x_index], x_error_sigma_for_training)
@@ -377,4 +399,12 @@ class add_data_from_csv:
                 self.Z_test_list.append(Z_list[i])
 
             self.division_indices_test.append(len(self.X_test_list))
+        elif add_mode == "as_replay":
+            for i in range(len(X_list)):
+                self.X_replay_list.append(X_list[i])
+                self.Y_replay_list.append(Y_smooth[i])
+                #self.Y_replay_list.append(Y_list[i])
+                self.Z_replay_list.append(Z_list[i])
+
+            self.division_indices_replay.append(len(self.X_replay_list))
         

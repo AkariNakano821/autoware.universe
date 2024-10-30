@@ -42,10 +42,12 @@ Eigen::VectorXd states_world_to_vehicle(Eigen::VectorXd states_world, double yaw
     lambda_ = lambda;
   }
   void PolynomialRegression::set_minimum_decay(double minimum_decay) { minimum_decay_ = minimum_decay; }
-  void PolynomialRegression::set_ignore_intercept() { predict_and_ignore_intercept_ = true; }
+  void PolynomialRegression::set_ignore_intercept() { ignore_intercept_ = true; }
+  void PolynomialRegression::set_predict() { predict_ = true; }
+  //void PolynomialRegression::set_ignore_intercept() { predict_and_ignore_intercept_ = true; }
   void PolynomialRegression::calc_coef_matrix()
   {
-    if (!predict_and_ignore_intercept_) {
+    if (!predict_) {
       Eigen::VectorXd time_vector = Eigen::VectorXd::LinSpaced(num_samples_, 0.0, num_samples_ - 1);
       Eigen::MatrixXd time_matrix = Eigen::MatrixXd::Ones(num_samples_, degree_ + 1);
     
@@ -65,7 +67,7 @@ Eigen::VectorXd states_world_to_vehicle(Eigen::VectorXd states_world, double yaw
       coef_matrix_ = (time_matrix.transpose() * decay_matrix * time_matrix + regularized_matrix).inverse() *
                     time_matrix.transpose() * decay_matrix;
     }
-    else {
+    else if (ignore_intercept_) {
       Eigen::VectorXd time_vector = Eigen::VectorXd::LinSpaced(num_samples_ -1 , - (num_samples_ - 1), - 1.0);
       Eigen::MatrixXd time_matrix = Eigen::MatrixXd::Zero(num_samples_ - 1 , degree_);
 
@@ -89,18 +91,47 @@ Eigen::VectorXd states_world_to_vehicle(Eigen::VectorXd states_world, double yaw
       coef_matrix_ = (time_matrix.transpose() * decay_matrix * time_matrix +
                       regularized_matrix).inverse() *
                     time_matrix.transpose() * decay_matrix;
-    } 
+    }
+    else{
+      Eigen::VectorXd time_vector = Eigen::VectorXd::LinSpaced(num_samples_, - (num_samples_ - 1),  0.0);
+      Eigen::MatrixXd time_matrix = Eigen::MatrixXd::Ones(num_samples_, degree_ + 1);
+      for (int i = 1; i < degree_; i++) {
+        time_matrix.col(i) = time_matrix.col(i - 1).array() * time_vector.array();
+      }
+      Eigen::VectorXd decay_vector = Eigen::VectorXd::LinSpaced(num_samples_, minimum_decay_, 1.0);
+      Eigen::MatrixXd decay_matrix = decay_vector.asDiagonal();
+
+      Eigen::MatrixXd regularized_matrix = Eigen::MatrixXd::Identity(degree_ + 1, degree_ + 1);
+      regularized_matrix(0, 0) = 0.0;
+      for (int i = 0; i < degree_; i++) {
+        regularized_matrix(i+1, i+1) = lambda_[i];
+      }
+      weight_matrix_ = time_matrix *
+                    (time_matrix.transpose() * decay_matrix * time_matrix + regularized_matrix).inverse() *
+                    time_matrix.transpose() * decay_matrix;
+      coef_matrix_ = (time_matrix.transpose() * decay_matrix * time_matrix + regularized_matrix).inverse() *
+                    time_matrix.transpose() * decay_matrix;
+    }
 
   }
   void PolynomialRegression::calc_prediction_matrix(int horizon_len)
   {
     Eigen::VectorXd time_vector = Eigen::VectorXd::LinSpaced(horizon_len, 1.0, horizon_len);
-    Eigen::MatrixXd pre_prediction_matrix = Eigen::MatrixXd::Zero(horizon_len, degree_);
-    pre_prediction_matrix.col(0) = time_vector;
-    for (int i = 1; i < degree_; i++) {
-      pre_prediction_matrix.col(i) = pre_prediction_matrix.col(i - 1).array() * time_vector.array();
+    if (ignore_intercept_){
+      Eigen::MatrixXd pre_prediction_matrix = Eigen::MatrixXd::Zero(horizon_len, degree_);
+      pre_prediction_matrix.col(0) = time_vector;
+      for (int i = 1; i < degree_; i++) {
+        pre_prediction_matrix.col(i) = pre_prediction_matrix.col(i - 1).array() * time_vector.array();
+      }
+      prediction_matrix_ = pre_prediction_matrix * coef_matrix_;
     }
-    prediction_matrix_ = pre_prediction_matrix * coef_matrix_;
+    else{
+      Eigen::MatrixXd pre_prediction_matrix = Eigen::MatrixXd::Ones(horizon_len, degree_ + 1);
+      for (int i = 1; i < degree_ + 1; i++) {
+        pre_prediction_matrix.col(i) = pre_prediction_matrix.col(i - 1).array() * time_vector.array();
+      }
+      prediction_matrix_ = pre_prediction_matrix * coef_matrix_;
+    }
   }
   Eigen::VectorXd PolynomialRegression::fit_transform(Eigen::VectorXd vec) { return weight_matrix_ * vec; }
   // Overloaded function for std::vector<Eigen::MatrixXd>
@@ -114,12 +145,22 @@ Eigen::VectorXd states_world_to_vehicle(Eigen::VectorXd states_world, double yaw
   }
   Eigen::VectorXd PolynomialRegression::predict(Eigen::VectorXd vec)
   {
-    Eigen::VectorXd vec_ = Eigen::VectorXd(vec.size() - 1);
-    vec_ = vec.head(vec.size() - 1);
-    vec_ = vec_.array() - vec[vec.size() - 1];
-    Eigen::VectorXd prediction = prediction_matrix_ * vec_;
-    prediction = prediction.array() + vec[vec.size() - 1];
-    return prediction;
+    if (ignore_intercept_) {
+      Eigen::VectorXd vec_ = Eigen::VectorXd(vec.size() - 1);
+      vec_ = vec.head(vec.size() - 1);
+      vec_ = vec_.array() - vec[vec.size() - 1];
+      Eigen::VectorXd prediction = prediction_matrix_ * vec_;
+      prediction = prediction.array() + vec[vec.size() - 1];
+      return prediction;
+    }
+    else {
+      Eigen::VectorXd vec_ = Eigen::VectorXd(vec.size());
+      vec_ = vec.array() - vec[vec.size() - 1];
+      Eigen::VectorXd prediction = prediction_matrix_ * vec;
+      prediction = prediction.array() + vec[vec.size() - 1];
+      return prediction;
+    }
+
   }
 
 ///////////////// Polynomial Filter ///////////////////////
@@ -1794,13 +1835,23 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     polynomial_reg_for_predict_acc_input_.set_params(
       deg_controller_acc_input_history_, controller_acc_input_history_len_, lam_controller_acc_input_history_);
     polynomial_reg_for_predict_acc_input_.set_minimum_decay(minimum_decay_controller_acc_input_history_);
-    polynomial_reg_for_predict_acc_input_.set_ignore_intercept();
+    //polynomial_reg_for_predict_acc_input_.set_ignore_intercept();
+    polynomial_reg_for_predict_acc_input_.set_predict();
+    bool ignore_intercept_acc_prediction = optimization_param_node["optimization_parameter"]["polynomial_regression"]["ignore_intercept_acc_prediction"].as<bool>();
+    if (ignore_intercept_acc_prediction){
+      polynomial_reg_for_predict_acc_input_.set_ignore_intercept();
+    }
     polynomial_reg_for_predict_acc_input_.calc_coef_matrix();
     polynomial_reg_for_predict_acc_input_.calc_prediction_matrix(predict_step_*horizon_len_-1);
     polynomial_reg_for_predict_steer_input_.set_params(
       deg_controller_steer_input_history_, controller_steer_input_history_len_, lam_controller_steer_input_history_);
     polynomial_reg_for_predict_steer_input_.set_minimum_decay(minimum_decay_controller_steer_input_history_);
-    polynomial_reg_for_predict_steer_input_.set_ignore_intercept();
+    //polynomial_reg_for_predict_steer_input_.set_ignore_intercept();
+    polynomial_reg_for_predict_steer_input_.set_predict();
+    bool ignore_intercept_steer_prediction = optimization_param_node["optimization_parameter"]["polynomial_regression"]["ignore_intercept_steer_prediction"].as<bool>();
+    if (ignore_intercept_steer_prediction){
+      polynomial_reg_for_predict_steer_input_.set_ignore_intercept();
+    }
     polynomial_reg_for_predict_steer_input_.calc_coef_matrix();
     polynomial_reg_for_predict_steer_input_.calc_prediction_matrix(predict_step_*horizon_len_-1);
     
@@ -1851,6 +1902,39 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     if (use_steer_input_schedule_prediction_ && !steer_input_schedule_prediction_initialized_){
       steer_input_schedule_prediction_.set_params(controller_steer_input_history_len, steer_input_schedule_prediction_len_ , control_dt_, "inputs_schedule_prediction_model/steer_schedule_predictor",adaptive_scale_index);
       steer_input_schedule_prediction_initialized_ = true;
+    }
+
+    double lambda_smooth_steer_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_smooth_steer_ref_smoother"].as<double>();
+    double lambda_decay_steer_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_decay_steer_ref_smoother"].as<double>();
+    double lambda_terminal_decay_steer_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_terminal_decay_steer_ref_smoother"].as<double>();
+    bool use_steer_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["use_steer_ref_smoother"].as<bool>();
+    steer_input_ref_smoother_.set_params(control_dt_, lambda_smooth_steer_ref_smoother, lambda_decay_steer_ref_smoother, lambda_terminal_decay_steer_ref_smoother);
+    steer_input_ref_smoother_.set_use_smoother(use_steer_ref_smoother);
+
+    double lambda_smooth_acc_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_smooth_acc_ref_smoother"].as<double>();
+    double lambda_decay_acc_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_decay_acc_ref_smoother"].as<double>();
+    double lambda_terminal_decay_acc_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["lambda_terminal_decay_acc_ref_smoother"].as<double>();
+    bool use_acc_ref_smoother = optimization_param_node["optimization_parameter"]["inputs_ref_smoother"]["use_acc_ref_smoother"].as<bool>();
+
+    acc_input_ref_smoother_.set_params(control_dt_, lambda_smooth_acc_ref_smoother, lambda_decay_acc_ref_smoother, lambda_terminal_decay_acc_ref_smoother);
+    acc_input_ref_smoother_.set_use_smoother(use_acc_ref_smoother);
+    if (use_acc_input_schedule_prediction_){
+      acc_input_ref_smoother_.set_prediction_len(acc_input_schedule_prediction_len_);
+    }
+    else if (use_acc_linear_extrapolation_){
+      acc_input_ref_smoother_.set_prediction_len(acc_linear_extrapolation_len_);
+    }
+    else{
+      acc_input_ref_smoother_.set_prediction_len(acc_polynomial_prediction_len_);
+    }
+    if (use_steer_input_schedule_prediction_){
+      steer_input_ref_smoother_.set_prediction_len(steer_input_schedule_prediction_len_);
+    }
+    else if (use_steer_linear_extrapolation_){
+      steer_input_ref_smoother_.set_prediction_len(steer_linear_extrapolation_len_);
+    }
+    else{
+      steer_input_ref_smoother_.set_prediction_len(steer_polynomial_prediction_len_);
     }
   }
   void VehicleAdaptor::set_NN_params(
@@ -2287,29 +2371,50 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     if (use_acc_input_schedule_prediction_)
     {
       std::vector<double> controller_acc_input_prediction_by_NN = acc_input_schedule_prediction_.get_inputs_schedule_predicted(acc_input_schedule_predictor_states, time_stamp);
-      for (int i = 0; i < horizon_len_ * predict_step_ - 1; i++)
+      //for (int i = 0; i < horizon_len_ * predict_step_ - 1; i++)
+      //{
+      //  if (i < acc_input_schedule_prediction_len_)
+      //  {
+      //    acc_controller_inputs_prediction_by_NN[i] = controller_acc_input_prediction_by_NN[i];
+      //  }
+      //  else{
+      //    acc_controller_inputs_prediction_by_NN[i] = acc_controller_inputs_prediction_by_NN[acc_input_schedule_prediction_len_ - 1];
+      //  }
+      //}
+      for (int i = 0; i < acc_input_schedule_prediction_len_; i++)
       {
-        if (i < acc_input_schedule_prediction_len_)
-        {
-          acc_controller_inputs_prediction_by_NN[i] = controller_acc_input_prediction_by_NN[i];
-        }
-        else{
-          acc_controller_inputs_prediction_by_NN[i] = acc_controller_inputs_prediction_by_NN[acc_input_schedule_prediction_len_ - 1];
-        }
+        acc_controller_inputs_prediction_by_NN[i] = controller_acc_input_prediction_by_NN[i];
       }
+      acc_controller_inputs_prediction_by_NN.head(acc_input_schedule_prediction_len_)
+                           = acc_input_ref_smoother_.get_smoothed_inputs_ref(acc_controller_input, acc_controller_inputs_prediction_by_NN.head(acc_input_schedule_prediction_len_));
+      for (int i = acc_input_schedule_prediction_len_; i < horizon_len_ * predict_step_ - 1; i++)
+      {
+        acc_controller_inputs_prediction_by_NN[i] = acc_controller_inputs_prediction_by_NN[acc_input_schedule_prediction_len_ - 1];
+      }
+      
     }
     if (use_steer_input_schedule_prediction_)
     {
       std::vector<double> controller_steer_input_prediction_by_NN = steer_input_schedule_prediction_.get_inputs_schedule_predicted(steer_input_schedule_predictor_states, time_stamp);
-      for (int i = 0; i < horizon_len_ * predict_step_ - 1; i++)
+      //for (int i = 0; i < horizon_len_ * predict_step_ - 1; i++)
+      //{
+      //  if (i < steer_input_schedule_prediction_len_)
+      //  {
+      //    steer_controller_inputs_prediction_by_NN[i] = controller_steer_input_prediction_by_NN[i];
+      //  }
+      //  else{
+      //    steer_controller_inputs_prediction_by_NN[i] = steer_controller_inputs_prediction_by_NN[steer_input_schedule_prediction_len_ - 1];
+      //  }
+      //}
+      for (int i = 0; i < steer_input_schedule_prediction_len_; i++)
       {
-        if (i < steer_input_schedule_prediction_len_)
-        {
-          steer_controller_inputs_prediction_by_NN[i] = controller_steer_input_prediction_by_NN[i];
-        }
-        else{
-          steer_controller_inputs_prediction_by_NN[i] = steer_controller_inputs_prediction_by_NN[steer_input_schedule_prediction_len_ - 1];
-        }
+        steer_controller_inputs_prediction_by_NN[i] = controller_steer_input_prediction_by_NN[i];
+      }
+      steer_controller_inputs_prediction_by_NN.head(steer_input_schedule_prediction_len_)
+                           = steer_input_ref_smoother_.get_smoothed_inputs_ref(steer_controller_input, steer_controller_inputs_prediction_by_NN.head(steer_input_schedule_prediction_len_));
+      for (int i = steer_input_schedule_prediction_len_; i < horizon_len_ * predict_step_ - 1; i++)
+      {
+        steer_controller_inputs_prediction_by_NN[i] = steer_controller_inputs_prediction_by_NN[steer_input_schedule_prediction_len_ - 1];
       }
     }
 
@@ -2336,10 +2441,14 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
         acc_controller_input_prediction.head(acc_linear_extrapolation_len_) = (acc_controller_input_history_[acc_controller_input_history_.size() - 1]
                                                                              - acc_controller_input_history_[acc_controller_input_history_.size() - past_len_for_acc_linear_extrapolation_ - 1]) / past_len_for_acc_linear_extrapolation_
                                                                               * Eigen::VectorXd::LinSpaced(acc_linear_extrapolation_len_, 1, acc_linear_extrapolation_len_) + acc_controller_input_history_[acc_controller_input_history_.size() - 1] * Eigen::VectorXd::Ones(acc_linear_extrapolation_len_);
+        acc_controller_input_prediction.head(acc_linear_extrapolation_len_)
+                             = acc_input_ref_smoother_.get_smoothed_inputs_ref(acc_controller_input, acc_controller_input_prediction.head(acc_linear_extrapolation_len_));
         acc_controller_input_prediction.tail(horizon_len_*predict_step_ - acc_linear_extrapolation_len_ -1) = acc_controller_input_prediction[acc_linear_extrapolation_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - acc_linear_extrapolation_len_ -1);
       }
       else{
         acc_controller_input_prediction.head(acc_polynomial_prediction_len_) = polynomial_reg_for_predict_acc_input_.predict(acc_controller_input_history_.tail(controller_acc_input_history_len_)).head(acc_polynomial_prediction_len_);
+        acc_controller_input_prediction.head(acc_polynomial_prediction_len_)
+                             = acc_input_ref_smoother_.get_smoothed_inputs_ref(acc_controller_input, acc_controller_input_prediction.head(acc_polynomial_prediction_len_));
         acc_controller_input_prediction.tail(horizon_len_*predict_step_ - acc_polynomial_prediction_len_ -1) = acc_controller_input_prediction[acc_polynomial_prediction_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - acc_polynomial_prediction_len_ -1);
       }
       acc_controller_input_history_with_schedule.tail(predict_step_*horizon_len_ - 1) = acc_controller_input_prediction;
@@ -2403,10 +2512,14 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
         acc_controller_input_prediction.head(acc_linear_extrapolation_len_) = (acc_controller_input_history_[acc_controller_input_history_.size() - 1]
                                                                              - acc_controller_input_history_[acc_controller_input_history_.size() - past_len_for_acc_linear_extrapolation_ - 1]) / past_len_for_acc_linear_extrapolation_
                                                                               * Eigen::VectorXd::LinSpaced(acc_linear_extrapolation_len_, 1, acc_linear_extrapolation_len_) + acc_controller_input_history_[acc_controller_input_history_.size() - 1] * Eigen::VectorXd::Ones(acc_linear_extrapolation_len_);
+        acc_controller_input_prediction.head(acc_linear_extrapolation_len_)
+                             = acc_input_ref_smoother_.get_smoothed_inputs_ref(acc_controller_input, acc_controller_input_prediction.head(acc_linear_extrapolation_len_));
         acc_controller_input_prediction.tail(horizon_len_*predict_step_ - acc_linear_extrapolation_len_ -1) = acc_controller_input_prediction[acc_linear_extrapolation_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - acc_linear_extrapolation_len_ -1);
       }
       else{
         acc_controller_input_prediction.head(acc_polynomial_prediction_len_) = polynomial_reg_for_predict_acc_input_.predict(acc_controller_input_history_.tail(controller_acc_input_history_len_)).head(acc_polynomial_prediction_len_);
+        acc_controller_input_prediction.head(acc_polynomial_prediction_len_)
+                             = acc_input_ref_smoother_.get_smoothed_inputs_ref(acc_controller_input, acc_controller_input_prediction.head(acc_polynomial_prediction_len_));
         acc_controller_input_prediction.tail(horizon_len_*predict_step_ - acc_polynomial_prediction_len_ -1) = acc_controller_input_prediction[acc_polynomial_prediction_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - acc_polynomial_prediction_len_ -1);
       }
       if (use_steer_input_schedule_prediction_)
@@ -2418,10 +2531,14 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
         steer_controller_input_prediction.head(steer_linear_extrapolation_len_) = (steer_controller_input_history_[steer_controller_input_history_.size() - 1]
                                                                              - steer_controller_input_history_[steer_controller_input_history_.size() - past_len_for_steer_linear_extrapolation_ - 1]) / past_len_for_steer_linear_extrapolation_
                                                                               * Eigen::VectorXd::LinSpaced(steer_linear_extrapolation_len_, 1, steer_linear_extrapolation_len_) + steer_controller_input_history_[steer_controller_input_history_.size() - 1] * Eigen::VectorXd::Ones(steer_linear_extrapolation_len_);
+        steer_controller_input_prediction.head(steer_linear_extrapolation_len_)
+                              = steer_input_ref_smoother_.get_smoothed_inputs_ref(steer_controller_input, steer_controller_input_prediction.head(steer_linear_extrapolation_len_));
         steer_controller_input_prediction.tail(horizon_len_*predict_step_ - steer_linear_extrapolation_len_ -1) = steer_controller_input_prediction[steer_linear_extrapolation_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - steer_linear_extrapolation_len_ -1);
       }
       else{
         steer_controller_input_prediction.head(steer_polynomial_prediction_len_) = polynomial_reg_for_predict_steer_input_.predict(steer_controller_input_history_.tail(controller_steer_input_history_len_)).head(steer_polynomial_prediction_len_);
+        steer_controller_input_prediction.head(steer_polynomial_prediction_len_)
+                              = steer_input_ref_smoother_.get_smoothed_inputs_ref(steer_controller_input, steer_controller_input_prediction.head(steer_polynomial_prediction_len_));
         steer_controller_input_prediction.tail(horizon_len_*predict_step_ - steer_polynomial_prediction_len_ -1) = steer_controller_input_prediction[steer_polynomial_prediction_len_ - 1]*Eigen::VectorXd::Ones(horizon_len_*predict_step_ - steer_polynomial_prediction_len_ -1);
       }
       acc_controller_input_history_with_schedule.tail(predict_step_*horizon_len_ - 1) = acc_controller_input_prediction;

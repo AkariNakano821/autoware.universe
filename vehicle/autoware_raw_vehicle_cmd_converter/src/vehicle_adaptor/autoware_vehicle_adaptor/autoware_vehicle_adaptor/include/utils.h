@@ -9,6 +9,7 @@
 #include "transform_vehicle_adaptor_model.h"
 #include <pybind11/stl.h>
 #include "linear_regression_compensator.h"
+#include "inputs_ref_smoother.h"
 
 Eigen::VectorXd states_vehicle_to_world(Eigen::VectorXd states_vehicle, double yaw);
 Eigen::VectorXd states_world_to_vehicle(Eigen::VectorXd states_world, double yaw);
@@ -50,7 +51,8 @@ private:
   int num_samples_ = 10;
   std::vector<double> lambda_ = {0.0, 0.0};
   Eigen::MatrixXd weight_matrix_, coef_matrix_, prediction_matrix_;
-  bool predict_and_ignore_intercept_ = false;
+  bool ignore_intercept_ = false;
+  bool predict_ = false;
   double minimum_decay_ = 1.0;
   // Template function to handle both Eigen::MatrixXd and Eigen::VectorXd
   template <typename T>
@@ -71,6 +73,7 @@ public:
   void set_params(int degree, int num_samples, std::vector<double> lambda);
   void set_minimum_decay(double minimum_decay);
   void set_ignore_intercept();
+  void set_predict();
   void calc_coef_matrix();
   void calc_prediction_matrix(int horizon_len);
   Eigen::VectorXd fit_transform(Eigen::VectorXd vec);
@@ -564,6 +567,7 @@ private:
   ButterworthFilter butterworth_filter_;
   PolynomialFilter polynomial_filter_for_acc_inputs_, polynomial_filter_for_steer_inputs_;
   InputsSchedulePrediction acc_input_schedule_prediction_, steer_input_schedule_prediction_;
+  InputsRefSmoother acc_input_ref_smoother_, steer_input_ref_smoother_;
   int sg_window_size_for_d_inputs_schedule_, sg_deg_for_d_inputs_schedule_;
   bool use_sg_for_d_inputs_schedule_;
   double wheel_base_ = 2.79;
