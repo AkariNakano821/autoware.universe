@@ -83,6 +83,8 @@ void ImuCorrector::callbackImu(const sensor_msgs::msg::Imu::ConstSharedPtr imu_m
   sensor_msgs::msg::Imu imu_msg;
   imu_msg = *imu_msg_ptr;
 
+  imu_msg.angular_velocity.z = -imu_msg.angular_velocity.z;
+
   imu_msg.angular_velocity.x -= angular_velocity_offset_x_imu_link_;
   imu_msg.angular_velocity.y -= angular_velocity_offset_y_imu_link_;
   imu_msg.angular_velocity.z -= angular_velocity_offset_z_imu_link_;
