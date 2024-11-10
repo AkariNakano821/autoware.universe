@@ -50,6 +50,11 @@ Control VehicleAdaptor::compensate(
     proxima_vehicle_adaptor_.set_NN_params_from_csv("vehicle_models/vehicle_model_4");
     proxima_vehicle_adaptor_.set_NN_params_from_csv("vehicle_models/vehicle_model_5");
     proxima_vehicle_adaptor_.send_initialized_flag();
+    if (proxima_vehicle_adaptor_.use_nonzero_initial_hidden_autoware_)
+    {
+      proxima_vehicle_adaptor_.set_attention_params_from_csv("vehicle_models/vehicle_model_1");
+      proxima_vehicle_adaptor_.set_initial_memory_bank("vehicle_models/vehicle_model_1");
+    }
     initialized_ = true;
   }
   Eigen::VectorXd states(6);
@@ -61,6 +66,12 @@ Control VehicleAdaptor::compensate(
   states[4] = accel.accel.accel.linear.x;
   states[5] = steering;
   double control_timestamp = input_control_cmd.stamp.sec + input_control_cmd.stamp.nanosec * 1e-9;
+  bool is_applying_control = operation_mode.mode > 1 && operation_mode.is_autoware_control_enabled;
+  if (!is_applying_control) {
+    proxima_vehicle_adaptor_.send_initialized_flag();
+    std::cerr << "vehicle adaptor on" << std::endl;
+    return input_control_cmd;
+  }
   if (proxima_vehicle_adaptor_.use_controller_steer_input_schedule_){
     std::vector<double> steer_controller_input_schedule(control_horizon.controls.size());
     for (int i = 0;i<int(control_horizon.controls.size());i++) {
@@ -75,13 +86,8 @@ Control VehicleAdaptor::compensate(
   output_control_cmd.longitudinal.acceleration = vehicle_adaptor_control_cmd[0];
   output_control_cmd.lateral.steering_tire_angle = vehicle_adaptor_control_cmd[1];
   yaw_prev_ = yaw;
-  bool is_applying_control = operation_mode.mode > 1 && operation_mode.is_autoware_control_enabled;
-  if (!is_applying_control) {
-    proxima_vehicle_adaptor_.send_initialized_flag();
-  }
   auto end = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-
   //std::cerr << "処理時間: " << duration << " ミリ秒" << std::endl;
   // std::cerr << "vehicle adaptor: compensate control command" << std::endl;
    //std::cerr << "Build path is: " << BUILD_PATH << std::endl;

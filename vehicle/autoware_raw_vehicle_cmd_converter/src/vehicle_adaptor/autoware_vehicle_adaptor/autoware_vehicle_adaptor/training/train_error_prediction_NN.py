@@ -2,6 +2,7 @@ from autoware_vehicle_adaptor.training import add_data_from_csv
 from autoware_vehicle_adaptor.training import error_prediction_NN
 from autoware_vehicle_adaptor.training import convert_model_to_csv
 from autoware_vehicle_adaptor.training.early_stopping import EarlyStopping
+from autoware_vehicle_adaptor.training.training_utils import TrainErrorPredictionNNFunctions, plot_relearned_vs_original_prediction_error
 from autoware_vehicle_adaptor.param import parameters
 import numpy as np
 import torch
@@ -20,191 +21,44 @@ import os
 import types
 from sklearn.linear_model import Lasso
 #torch.autograd.set_detect_anomaly(True)
-package_path_json = str(Path(__file__).parent.parent) + "/package_path.json"
-with open(package_path_json, "r") as file:
-    package_path = json.load(file)
 
-trained_model_param_path = (
-    package_path["path"] + "/autoware_vehicle_adaptor/param/trained_model_param.yaml"
-)
-with open(trained_model_param_path, "r") as yml:
-    trained_model_param = yaml.safe_load(yml)
-prediction_length = int(trained_model_param["trained_model_parameter"]["lstm"]["predict_lstm_len"])
-past_length = int(trained_model_param["trained_model_parameter"]["lstm"]["update_lstm_len"])
-integration_length = int(trained_model_param["trained_model_parameter"]["loss"]["integration_len"])
-integration_weight = float(trained_model_param["trained_model_parameter"]["loss"]["integration_weight"])
-add_position_to_prediction = bool(trained_model_param["trained_model_parameter"]["setting"]["add_position_to_prediction"])
-add_vel_to_prediction = bool(trained_model_param["trained_model_parameter"]["setting"]["add_vel_to_prediction"])
-add_yaw_to_prediction = bool(trained_model_param["trained_model_parameter"]["setting"]["add_yaw_to_prediction"])
-integrate_states = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_states"])
-integrate_vel = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_vel"])
-integrate_yaw = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_yaw"])
-if not add_vel_to_prediction:
-    integrate_vel = False
-if not add_yaw_to_prediction:
-    integrate_yaw = False
+get_loss = TrainErrorPredictionNNFunctions.get_loss
+validate_in_batches = TrainErrorPredictionNNFunctions.validate_in_batches
+get_each_component_loss = TrainErrorPredictionNNFunctions.get_each_component_loss
+get_losses = TrainErrorPredictionNNFunctions.get_losses
+get_signed_prediction_error = TrainErrorPredictionNNFunctions.get_signed_prediction_error
+get_sequence_data = TrainErrorPredictionNNFunctions.get_sequence_data
 
-state_component_predicted =[]
-state_component_predicted_index = []
-if add_position_to_prediction:
-    state_component_predicted.append("x")
-    state_component_predicted_index.append(0)
-    state_component_predicted.append("y")
-    state_component_predicted_index.append(1)
-if add_vel_to_prediction:
-    state_component_predicted.append("vel")
-    state_component_predicted_index.append(2)
-if add_yaw_to_prediction:
-    state_component_predicted.append("yaw")
-    state_component_predicted_index.append(3)
-state_component_predicted.append("acc")
-state_component_predicted_index.append(4)
-state_component_predicted.append("steer")
-state_component_predicted_index.append(5)
-state_name_to_predicted_index = {}
-for i in range(len(state_component_predicted)):
-    state_name_to_predicted_index[state_component_predicted[i]] = i
+prediction_length = parameters.prediction_length
+past_length = parameters.past_length
+integration_length = parameters.integration_length
+integration_weight = parameters.integration_weight
+add_position_to_prediction = parameters.add_position_to_prediction
+add_vel_to_prediction = parameters.add_vel_to_prediction
+add_yaw_to_prediction = parameters.add_yaw_to_prediction
+integrate_states = parameters.integrate_states
+integrate_vel = parameters.integrate_vel
+integrate_yaw = parameters.integrate_yaw
 
-nominal_param_path = (
-    package_path["path"] + "/autoware_vehicle_adaptor/param/nominal_param.yaml"
-)
-with open(nominal_param_path, "r") as yml:
-    nominal_param = yaml.safe_load(yml)
-optimization_param_path = (
-    package_path["path"] + "/autoware_vehicle_adaptor/param/optimization_param.yaml"
-)
-with open(optimization_param_path, "r") as yml:
-    optimization_param = yaml.safe_load(yml)
-acc_queue_size = int(trained_model_param["trained_model_parameter"]["queue_size"]["acc_queue_size"])
-steer_queue_size = int(trained_model_param["trained_model_parameter"]["queue_size"]["steer_queue_size"])
-control_dt = 0.033
-acc_delay_step = round(nominal_param["nominal_parameter"]["acceleration"]["acc_time_delay"] / control_dt)
-steer_delay_step = round(nominal_param["nominal_parameter"]["steering"]["steer_time_delay"] / control_dt)
-acc_time_constant = nominal_param["nominal_parameter"]["acceleration"]["acc_time_constant"]
-steer_time_constant = nominal_param["nominal_parameter"]["steering"]["steer_time_constant"]
-wheel_base = nominal_param["nominal_parameter"]["vehicle_info"]["wheel_base"]
+state_component_predicted = parameters.state_component_predicted
+state_component_predicted_index = parameters.state_component_predicted_index
+state_name_to_predicted_index = parameters.state_name_to_predicted_index
+
+acc_queue_size = parameters.acc_queue_size
+steer_queue_size = parameters.steer_queue_size
+control_dt = parameters.control_dt
+acc_delay_step = parameters.acc_delay_step
+steer_delay_step = parameters.steer_delay_step
+acc_time_constant = parameters.acc_time_constant
+steer_time_constant = parameters.steer_time_constant
+wheel_base = parameters.wheel_base
 vel_index = 0
 acc_index = 1
 steer_index = 2
-prediction_step = int(optimization_param["optimization_parameter"]["setting"]["predict_step"])
+prediction_step = parameters.mpc_predict_step
 acc_input_indices_nom =  np.arange(3 + acc_queue_size -acc_delay_step, 3 + acc_queue_size -acc_delay_step + prediction_step)
 steer_input_indices_nom = np.arange(3 + acc_queue_size + prediction_step + steer_queue_size -steer_delay_step, 3 + acc_queue_size + steer_queue_size -steer_delay_step + 2 * prediction_step)
 
-
-
-
-def transform_to_sequence_data(X, seq_size, indices, prediction_step):
-    X_seq = []
-    start_num = 0
-    for i in range(len(indices)):
-        j = 0
-        while start_num + j + prediction_step * seq_size <= indices[i]:
-            X_seq.append(X[start_num + j + prediction_step * np.arange(seq_size)])
-            j += 1
-        start_num = indices[i]
-
-    return np.array(X_seq)
-
-
-
-def get_loss(criterion, model, X_batch, Y, Z, adaptive_weight,tanh_gain = 10, tanh_weight = 0.1, first_order_weight = 0.01, second_order_weight = 0.01, randomize_previous_error=[0.5,0.1], integral_prob=0.0, alpha_jacobian=0.01, calc_jacobian_len=10, eps=1e-6):
-    randomize_scale_tensor = torch.tensor(randomize_previous_error).to(X_batch.device)
-    previous_error = Y[:, :past_length, -2:] + torch.mean(torch.abs(Y[:, :past_length, -2:]),dim=1).unsqueeze(1) * randomize_scale_tensor * torch.randn_like(Y[:, :past_length, -2:])
-    Y_pred, hc = model(X_batch, previous_error=previous_error, mode="get_lstm_states")
-    # Calculate the loss
-    loss = criterion(Y_pred * adaptive_weight, Y[:,past_length:] * adaptive_weight)
-    if alpha_jacobian is not None:
-        hc_perturbed = model(X_batch[:, :past_length] + eps * torch.randn_like(X_batch[:, :past_length]),previous_error=previous_error + eps * torch.randn_like(previous_error), mode="only_encoder")
-        Y_perturbed, _ = model(X_batch[:, past_length: past_length + calc_jacobian_len] + eps * torch.randn_like(X_batch[:, past_length: past_length + calc_jacobian_len]), hc=hc_perturbed, mode="predict_with_hc")
-        loss += alpha_jacobian * criterion((Y_perturbed - Y_pred[:,:calc_jacobian_len]) / eps, torch.zeros_like(Y_perturbed))
-    # Calculate the integrated loss
-    #if integrate_states:
-    if random.random() < integral_prob:
-        predicted_states = X_batch[:, past_length, [vel_index, acc_index, steer_index]].unsqueeze(1)
-        if integrate_yaw:
-            predicted_yaw = Z[:,0,state_name_to_predicted_index["yaw"]]
-        for i in range(integration_length):
-            predicted_states_with_input_history = torch.cat((predicted_states, X_batch[:,[past_length + i], 3:]), dim=2)
-            predicted_error, hc =  model(predicted_states_with_input_history, hc=hc, mode="predict_with_hc")
-            for j in range(prediction_step):
-                if integrate_vel:
-                    predicted_states[:,0,0] = predicted_states[:,0,0] + predicted_states[:,0,1] * control_dt
-                if integrate_yaw:
-                    predicted_yaw = predicted_yaw + Z[:,i*prediction_step + j,state_name_to_predicted_index["vel"]]* torch.tan(predicted_states[:,0,2]) / wheel_base * control_dt
-                predicted_states[:,0,1] = predicted_states[:,0,1] + (X_batch[:,past_length + i, acc_input_indices_nom[j]] - predicted_states[:,0,1]) * (1 - np.exp(- control_dt / acc_time_constant))
-                predicted_states[:,0,2] = predicted_states[:,0,2] + (X_batch[:,past_length + i, steer_input_indices_nom[j]] - predicted_states[:,0,2])  * (1 - np.exp(- control_dt / steer_time_constant))
-            if integrate_vel:
-                predicted_states[:,0,0] = predicted_states[:,0,0] + predicted_error[:,0,state_name_to_predicted_index["vel"]] * control_dt * prediction_step
-            else:
-                predicted_states[:,0,0] = X_batch[:,past_length + i + 1, vel_index]
-            if integrate_yaw:
-                predicted_yaw = predicted_yaw + predicted_error[:,0,state_name_to_predicted_index["yaw"]] * control_dt * prediction_step
-            predicted_states[:,0,-2] = predicted_states[:,0,-2] + predicted_error[:,0,-2] * control_dt * prediction_step
-            predicted_states[:,0,-1] = predicted_states[:,0,-1] + predicted_error[:,0,-1] * control_dt * prediction_step
-        if integrate_vel:
-            loss += integration_weight*criterion(predicted_states[:,0,0], Z[:,-1,state_name_to_predicted_index["vel"]])
-        if integrate_yaw:
-            loss += integration_weight*criterion(predicted_yaw, Z[:,-1,state_name_to_predicted_index["yaw"]])
-        loss += adaptive_weight[-2] * integration_weight*criterion(predicted_states[:,0,-2], Z[:,-1,state_name_to_predicted_index["acc"]])
-        loss += adaptive_weight[-1] * integration_weight*criterion(predicted_states[:,0,-1], Z[:,-1,state_name_to_predicted_index["steer"]])
-    # Calculate the tanh loss
-    loss += tanh_weight * criterion(torch.tanh(tanh_gain * (Y_pred[:,:,-1]-Y[:,past_length:,-1])),torch.zeros_like(Y_pred[:,:,-1]))
-    # Calculate the first order loss
-    first_order_loss = first_order_weight * criterion(Y_pred[:, 1:] - Y_pred[:, :-1], torch.zeros_like(Y_pred[:, 1:]))
-    # Calculate the second order loss
-    second_order_loss = second_order_weight * criterion(Y_pred[:, 2:] - 2 * Y_pred[:, 1:-1] + Y_pred[:, :-2], torch.zeros_like(Y_pred[:, 2:]))
-    # Calculate the total loss
-    total_loss = loss + first_order_loss + second_order_loss
-    return total_loss
-
-def validate_in_batches(model, criterion, X_val, Y_val, Z_val, adaptive_weight, randomize_previous_error=[0.03,0.03],batch_size=3000,alpha_jacobian=None,calc_jacobian_len=10,eps=1e-5):
-    model.eval()
-    val_loss = 0.0
-    num_batches = (X_val.size(0) + batch_size - 1) // batch_size
-    
-    with torch.no_grad():
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, X_val.size(0))
-            
-            X_batch = X_val[start_idx:end_idx]
-            Y_batch = Y_val[start_idx:end_idx]
-            Z_batch = Z_val[start_idx:end_idx]
-            
-            loss = get_loss(criterion, model, X_batch, Y_batch, Z_batch,adaptive_weight=adaptive_weight,randomize_previous_error=randomize_previous_error,alpha_jacobian=alpha_jacobian,calc_jacobian_len=calc_jacobian_len,eps=eps)
-            val_loss += loss.item() * (end_idx - start_idx)
-    
-    val_loss /= X_val.size(0)
-    return val_loss
-def get_each_component_loss(model, X_val, Y_val,tanh_gain = 10, tanh_weight = 0.1, first_order_weight = 0.01, second_order_weight = 0.01, batch_size=3000, window_size=10):
-    model.eval()
-    val_loss = np.zeros(Y_val.size(2))
-    tanh_loss = 0.0
-    first_order_loss = 0.0
-    second_order_loss = 0.0
-    num_batches = (X_val.size(0) + batch_size - 1) // batch_size
-    Y_pred_list = []
-    with torch.no_grad():
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, X_val.size(0))
-            
-            X_batch = X_val[start_idx:end_idx]
-            Y_batch = Y_val[start_idx:end_idx]
-            Y_pred, _ = model(X_batch, previous_error=Y_batch[:, :past_length, -2:], mode="get_lstm_states")
-            Y_pred_list.append(Y_pred[:,window_size])
-            # Calculate the loss
-            loss = torch.mean(torch.abs(Y_pred - Y_batch[:,past_length:]),dim=(0,1))
-            val_loss += loss.cpu().numpy() * (end_idx - start_idx)
-            tanh_loss += tanh_weight * torch.mean(torch.abs(torch.tanh(tanh_gain * (Y_pred[:,:,-1]-Y_batch[:,past_length:,-1])))).item() * (end_idx - start_idx)
-            first_order_loss += first_order_weight * torch.mean(torch.abs((Y_pred[:, 1:] - Y_pred[:, :-1]) - (Y_batch[:, past_length + 1:] - Y_batch[:, past_length:-1]))).item() * (end_idx - start_idx)
-            second_order_loss += second_order_weight * torch.mean(torch.abs((Y_pred[:, 2:] - 2 * Y_pred[:, 1:-1] + Y_pred[:, :-2]) - (Y_batch[:, past_length + 2:] - 2 * Y_batch[:, past_length + 1:-1] + Y_batch[:, past_length:-2]))).item() * (end_idx - start_idx)
-    val_loss /= (X_val.size(0) * Y_val.size(2))
-    tanh_loss /= X_val.size(0)
-    first_order_loss /= X_val.size(0)
-    second_order_loss /= X_val.size(0)
-    Y_pred_np = torch.cat(Y_pred_list,dim=0).cpu().detach().numpy()
-    return np.concatenate((val_loss, [tanh_loss, first_order_loss, second_order_loss])), Y_pred_np
 
 
 class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
@@ -242,9 +96,9 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         fix_lstm: bool = False,
         randomize_fix_lstm: float = 0.001,
         integration_prob: float = 0.1,
-        X_replay: torch.Tensor = None,
-        Y_replay: torch.Tensor = None,
-        Z_replay: torch.Tensor = None,
+        X_replay: torch.Tensor | None = None,
+        Y_replay: torch.Tensor | None = None,
+        Z_replay: torch.Tensor | None = None,
         replay_data_rate: float = 0.05,
     ):
         """Train the error prediction NN."""
@@ -367,15 +221,19 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         self.update_adaptive_weight(model,X_train,Y_train)
         original_adaptive_weight = self.adaptive_weight.clone()
         criterion = nn.L1Loss()
-        original_train_loss = validate_in_batches(model,criterion,X_train, Y_train, Z_train, adaptive_weight=original_adaptive_weight)
-        original_each_component_train_loss, Y_train_pred_origin = get_each_component_loss(model, X_train, Y_train)
-        original_val_loss = validate_in_batches(model,criterion,X_val, Y_val, Z_val, adaptive_weight=original_adaptive_weight)
-        original_each_component_val_loss, Y_val_pred_origin = get_each_component_loss(model, X_val, Y_val)
+        original_train_loss, original_each_component_train_loss, Y_train_pred_origin = get_losses(
+            model, criterion, X_train, Y_train, Z_train, adaptive_weight=original_adaptive_weight)
+        original_val_loss, original_each_component_val_loss, Y_val_pred_origin = get_losses(
+            model, criterion, X_val, Y_val, Z_val, adaptive_weight=original_adaptive_weight)
         if X_test is not None:
-            original_test_loss = validate_in_batches(model,criterion,X_test, Y_test, Z_test, adaptive_weight=original_adaptive_weight)
-            original_each_component_test_loss, Y_test_pred_origin = get_each_component_loss(model, X_test, Y_test)
+            original_test_loss, original_each_component_test_loss, Y_test_pred_origin = get_losses(
+                model, criterion, X_test, Y_test, Z_test, adaptive_weight=original_adaptive_weight)
+        else:
+            original_test_loss = None
+            original_each_component_test_loss = None
+            Y_test_pred_origin = None
         if reset_weight:
-            relearned_model = error_prediction_NN.ErrorPredictionNN(output_size=len(state_component_predicted_index), prediction_length=prediction_length).to(self.device)
+            relearned_model = error_prediction_NN.ErrorPredictionNN(prediction_length=prediction_length,state_component_predicted=state_component_predicted).to(self.device)
         else:
             relearned_model = copy.deepcopy(model)
             relearned_model.lstm_encoder.flatten_parameters()
@@ -410,147 +268,69 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             Z_replay=Z_replay,
             replay_data_rate=replay_data_rate,
         )
-        relearned_train_loss = validate_in_batches(relearned_model,criterion,X_train, Y_train, Z_train, adaptive_weight=original_adaptive_weight)
-        relearned_each_component_train_loss, Y_train_pred_relearned = get_each_component_loss(relearned_model, X_train, Y_train,window_size=window_size)
-        relearned_val_loss = validate_in_batches(relearned_model,criterion,X_val, Y_val, Z_val, adaptive_weight=original_adaptive_weight)
-        relearned_each_component_val_loss, Y_val_pred_relearned = get_each_component_loss(relearned_model, X_val, Y_val,window_size=window_size)
+        relearned_train_loss, relearned_each_component_train_loss, Y_train_pred_relearned = get_losses(
+            relearned_model, criterion, X_train, Y_train, Z_train, adaptive_weight=original_adaptive_weight)
+        relearned_val_loss, relearned_each_component_val_loss, Y_val_pred_relearned = get_losses(
+            relearned_model, criterion, X_val, Y_val, Z_val, adaptive_weight=original_adaptive_weight)
         if X_test is not None:
-            relearned_test_loss = validate_in_batches(relearned_model,criterion,X_test, Y_test, Z_test, adaptive_weight=original_adaptive_weight)
-            relearned_each_component_test_loss, Y_test_pred_relearned = get_each_component_loss(relearned_model, X_test, Y_test,window_size=window_size)
-        print("original_train_loss: ", original_train_loss)
-        print("relearned_train_loss: ", relearned_train_loss)
-        print("original_val_loss: ", original_val_loss)
-        print("relearned_val_loss: ", relearned_val_loss)
-        if X_test is not None:
-            print("original_test_loss: ", original_test_loss)
-            print("relearned_test_loss: ", relearned_test_loss)
+            relearned_test_loss, relearned_each_component_test_loss, Y_test_pred_relearned = get_losses(
+                relearned_model, criterion, X_test, Y_test, Z_test, adaptive_weight=original_adaptive_weight)
+        else:
+            relearned_test_loss = None
+            relearned_each_component_test_loss = None
+            Y_test_pred_relearned = None
 
-        print("original_each_component_train_loss: ", original_each_component_train_loss)
-        print("relearned_each_component_train_loss: ", relearned_each_component_train_loss)
-        print("original_each_component_val_loss: ", original_each_component_val_loss)
-        print("relearned_each_component_val_loss: ", relearned_each_component_val_loss)
-        if X_test is not None:
-            print("original_each_component_test_loss: ", original_each_component_test_loss)
-            print("relearned_each_component_test_loss: ", relearned_each_component_test_loss)
-
-        original_train_prediction, nominal_train_prediction = self.get_acc_steer_prediction(model,X_train.to("cpu"),Y_train.to("cpu"),window_size)
-        relearned_train_prediction, _ = self.get_acc_steer_prediction(relearned_model,X_train.to("cpu"),Y_train.to("cpu"),window_size)
-
-        original_val_prediction, nominal_val_prediction = self.get_acc_steer_prediction(model,X_val.to("cpu"),Y_val.to("cpu"),window_size)
-        relearned_val_prediction, _ = self.get_acc_steer_prediction(relearned_model,X_val.to("cpu"),Y_val.to("cpu"),window_size)
-
-        nominal_singed_train_prediction_error = X_train[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - nominal_train_prediction
-        original_singed_train_prediction_error = X_train[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - original_train_prediction
-        relearned_singed_train_prediction_error = X_train[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - relearned_train_prediction
-
-        nominal_signed_val_prediction_error = X_val[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - nominal_val_prediction
-        original_singed_val_prediction_error = X_val[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - original_val_prediction
-        relearned_singed_val_prediction_error = X_val[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - relearned_val_prediction
+        
+        nominal_signed_train_prediction_error, original_signed_train_prediction_error, relearned_signed_train_prediction_error = get_signed_prediction_error(
+            model, relearned_model, X_train, Y_train, window_size
+        )
+        nominal_signed_val_prediction_error, original_signed_val_prediction_error, relearned_signed_val_prediction_error = get_signed_prediction_error(
+            model, relearned_model, X_val, Y_val, window_size
+        )
 
         if X_test is not None:
-            original_test_prediction, nominal_test_prediction = self.get_acc_steer_prediction(model,X_test.to("cpu"),Y_test.to("cpu"),window_size)
-            relearned_test_prediction, _ = self.get_acc_steer_prediction(relearned_model,X_test.to("cpu"),Y_test.to("cpu"),window_size)
+            nominal_signed_test_prediction_error, original_signed_test_prediction_error, relearned_signed_test_prediction_error = get_signed_prediction_error(
+                model, relearned_model, X_test, Y_test, window_size
+            )
+        else:
+            nominal_signed_test_prediction_error = None
+            original_signed_test_prediction_error = None
+            relearned_signed_test_prediction_error = None   
 
-            nominal_signed_test_prediction_error = X_test[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - nominal_test_prediction
-            original_singed_test_prediction_error = X_test[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - original_test_prediction
-            relearned_singed_test_prediction_error = X_test[:,past_length+window_size,[1,2]].to("cpu").detach().numpy() - relearned_test_prediction
-
-        print("nominal acc train prediction loss:", np.mean(np.abs(nominal_singed_train_prediction_error[:,0])))
-        print("original acc train prediction loss:", np.mean(np.abs(original_singed_train_prediction_error[:,0])))
-        print("relearned acc train prediction loss:", np.mean(np.abs(relearned_singed_train_prediction_error[:,0])))
-        print("nominal steer train prediction loss:", np.mean(np.abs(nominal_singed_train_prediction_error[:,1])))
-        print("original steer train prediction loss:", np.mean(np.abs(original_singed_train_prediction_error[:,1])))
-        print("relearned steer train prediction loss:", np.mean(np.abs(relearned_singed_train_prediction_error[:,1])))
-        print("nominal acc val prediction loss:", np.mean(np.abs(nominal_signed_val_prediction_error[:,0])))
-        print("original acc val prediction loss:", np.mean(np.abs(original_singed_val_prediction_error[:,0])))
-        print("relearned acc val prediction loss:", np.mean(np.abs(relearned_singed_val_prediction_error[:,0])))
-        print("nominal steer val prediction loss:", np.mean(np.abs(nominal_signed_val_prediction_error[:,1])))
-        print("original steer val prediction loss:", np.mean(np.abs(original_singed_val_prediction_error[:,1])))
-        print("relearned steer val prediction loss:", np.mean(np.abs(relearned_singed_val_prediction_error[:,1])))
-        if X_test is not None:
-            print("nominal acc test prediction loss:", np.mean(np.abs(nominal_signed_test_prediction_error[:,0])))
-            print("original acc test prediction loss:", np.mean(np.abs(original_singed_test_prediction_error[:,0])))
-            print("relearned acc test prediction loss:", np.mean(np.abs(relearned_singed_test_prediction_error[:,0])))
-            print("nominal steer test prediction loss:", np.mean(np.abs(nominal_signed_test_prediction_error[:,1])))
-            print("original steer test prediction loss:", np.mean(np.abs(original_singed_test_prediction_error[:,1])))
-            print("relearned steer test prediction loss:", np.mean(np.abs(relearned_singed_test_prediction_error[:,1])))
-        if plt_save_dir is not None:
-            if X_test is None:
-                fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(24,15), tight_layout=True)
-            else:
-                fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(24,15), tight_layout=True)
-            fig.suptitle("acc steer prediction error")
-            axes[0,0].plot(nominal_singed_train_prediction_error[:,0],label="nominal")
-            axes[0,0].plot(original_singed_train_prediction_error[:,0],label="original")
-            axes[0,0].plot(relearned_singed_train_prediction_error[:,0],label="relearned")
-            axes[0,0].scatter(np.arange(len(nominal_singed_train_prediction_error[:,0])),np.zeros(len(nominal_singed_train_prediction_error[:,0])), s=1)
-            axes[0,0].set_title("acc prediction error for training data")
-            axes[0,0].legend()
-            axes[0,1].plot(nominal_signed_val_prediction_error[:,0],label="nominal")
-            axes[0,1].plot(original_singed_val_prediction_error[:,0],label="original")
-            axes[0,1].plot(relearned_singed_val_prediction_error[:,0],label="relearned")
-            axes[0,1].scatter(np.arange(len(nominal_signed_val_prediction_error[:,0])),np.zeros(len(nominal_signed_val_prediction_error[:,0])), s=1)
-            axes[0,1].set_title("acc prediction error for validation data")
-            axes[0,1].legend()
-            axes[1,0].plot(nominal_singed_train_prediction_error[:,1],label="nominal")
-            axes[1,0].plot(original_singed_train_prediction_error[:,1],label="original")
-            axes[1,0].plot(relearned_singed_train_prediction_error[:,1],label="relearned")
-            axes[1,0].scatter(np.arange(len(nominal_singed_train_prediction_error[:,1])),np.zeros(len(nominal_singed_train_prediction_error[:,1])), s=1)
-            axes[1,0].set_title("steer prediction error for training data")
-            axes[1,0].legend()
-            axes[1,1].plot(nominal_signed_val_prediction_error[:,1],label="nominal")
-            axes[1,1].plot(original_singed_val_prediction_error[:,1],label="original")
-            axes[1,1].plot(relearned_singed_val_prediction_error[:,1],label="relearned")
-            axes[1,1].scatter(np.arange(len(nominal_signed_val_prediction_error[:,1])),np.zeros(len(nominal_signed_val_prediction_error[:,1])), s=1)
-            axes[1,1].set_title("steer prediction error for validation data")
-            axes[1,1].legend()
-            if X_test is not None:
-                axes[0,2].plot(nominal_signed_test_prediction_error[:,0],label="nominal")
-                axes[0,2].plot(original_singed_test_prediction_error[:,0],label="original")
-                axes[0,2].plot(relearned_singed_test_prediction_error[:,0],label="relearned")
-                axes[0,2].scatter(np.arange(len(nominal_signed_test_prediction_error[:,0])),np.zeros(len(nominal_signed_test_prediction_error[:,0])), s=1)
-                axes[0,2].set_title("acc prediction error for test data")
-                axes[0,2].legend()
-                axes[1,2].plot(nominal_signed_test_prediction_error[:,1],label="nominal")
-                axes[1,2].plot(original_singed_test_prediction_error[:,1],label="original")
-                axes[1,2].plot(relearned_singed_test_prediction_error[:,1],label="relearned")
-                axes[1,2].scatter(np.arange(len(nominal_signed_test_prediction_error[:,1])),np.zeros(len(nominal_signed_test_prediction_error[:,1])), s=1)
-                axes[1,2].set_title("steer prediction error for test data")
-                axes[1,2].legend()
-            if not os.path.isdir(plt_save_dir):
-                os.mkdir(plt_save_dir)
-            plt.savefig(plt_save_dir + "/acc_steer_prediction_error.png")
-            plt.close()
-            Y_nominal_train_pred = Y_train[:,past_length+window_size,:].to("cpu").detach().numpy()
-            Y_nominal_val_pred = Y_val[:,past_length+window_size,:].to("cpu").detach().numpy()
-            if X_test is None:
-                fig, axes = plt.subplots(nrows=len(state_component_predicted), ncols=2, figsize=(24,15), tight_layout=True)
-            else:
-                Y_nominal_test_pred = Y_test[:,past_length+window_size,:].to("cpu").detach().numpy()
-                fig, axes = plt.subplots(nrows=len(state_component_predicted), ncols=3, figsize=(24,15), tight_layout=True)
-            fig.suptitle("each component error")
-            for i in range(len(state_component_predicted)):
-                axes[i,0].plot(Y_nominal_train_pred[:,i],label="nominal")
-                axes[i,0].plot(Y_nominal_train_pred[:,i]-Y_train_pred_origin[:,i],label="original")
-                axes[i,0].plot(Y_nominal_train_pred[:,i]-Y_train_pred_relearned[:,i],label="relearned")
-                axes[i,0].scatter(np.arange(len(Y_nominal_train_pred[:,i])),np.zeros(len(Y_nominal_train_pred[:,i])), s=1)
-                axes[i,0].set_title(state_component_predicted[i] + " error for training data")
-                axes[i,0].legend()
-                axes[i,1].plot(Y_nominal_val_pred[:,i],label="nominal")
-                axes[i,1].plot(Y_nominal_val_pred[:,i]-Y_val_pred_origin[:,i],label="original")
-                axes[i,1].plot(Y_nominal_val_pred[:,i]-Y_val_pred_relearned[:,i],label="relearned")
-                axes[i,1].scatter(np.arange(len(Y_nominal_val_pred[:,i])),np.zeros(len(Y_nominal_val_pred[:,i])), s=1)
-                axes[i,1].set_title(state_component_predicted[i] + " error for validation data")
-                axes[i,1].legend()
-                if X_test is not None:
-                    axes[i,2].plot(Y_nominal_test_pred[:,i],label="nominal")
-                    axes[i,2].plot(Y_nominal_test_pred[:,i]-Y_test_pred_origin[:,i],label="original")
-                    axes[i,2].plot(Y_nominal_test_pred[:,i]-Y_test_pred_relearned[:,i],label="relearned")
-                    axes[i,2].scatter(np.arange(len(Y_nominal_test_pred[:,i])),np.zeros(len(Y_nominal_test_pred[:,i])), s=4)
-                    axes[i,2].set_title(state_component_predicted[i] + " error for test data")
-                    axes[i,2].legend()
-            plt.savefig(plt_save_dir + "/each_component_error.png")
-            plt.close()
+        plot_relearned_vs_original_prediction_error(
+                window_size,
+                original_train_loss,
+                relearned_train_loss,
+                original_each_component_train_loss,
+                relearned_each_component_train_loss,
+                nominal_signed_train_prediction_error,
+                original_signed_train_prediction_error,
+                relearned_signed_train_prediction_error,
+                Y_train,
+                Y_train_pred_origin,
+                Y_train_pred_relearned,
+                original_val_loss,
+                relearned_val_loss,
+                original_each_component_val_loss,
+                relearned_each_component_val_loss,
+                nominal_signed_val_prediction_error,
+                original_signed_val_prediction_error,
+                relearned_signed_val_prediction_error,
+                Y_val,
+                Y_val_pred_origin,
+                Y_val_pred_relearned,
+                original_test_loss,
+                relearned_test_loss,
+                original_each_component_test_loss,
+                relearned_each_component_test_loss,
+                nominal_signed_test_prediction_error,
+                original_signed_test_prediction_error,
+                relearned_signed_test_prediction_error,
+                Y_test,
+                Y_test_pred_origin,
+                Y_test_pred_relearned,
+                plt_save_dir
+            )
         if save_path is not None:
             self.save_given_model(relearned_model, save_path)
         if relearned_val_loss < original_val_loss or always_update_model:
@@ -561,10 +341,10 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
     def get_trained_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100]):
         print("state_component_predicted: ", state_component_predicted)
         # Define Time Series Data
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         self.model = error_prediction_NN.ErrorPredictionNN(
-            output_size=len(state_component_predicted_index), prediction_length=prediction_length
+            prediction_length=prediction_length, state_component_predicted=state_component_predicted
         ).to(self.device)
         self.update_adaptive_weight(None,torch.tensor(X_train_np, dtype=torch.float32, device=self.device),torch.tensor(Y_train_np, dtype=torch.float32, device=self.device))
         self.train_model(
@@ -582,10 +362,10 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
     def get_relearned_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100],reset_weight=False, randomize=0.001,plt_save_dir=None,save_path=None, use_replay_data=False, replay_data_rate=0.05, always_update_model=False):
         self.model.to(self.device)
         # Define Time Series Data
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         if len(self.X_test_list) > 0:
-            X_test_np, Y_test_np, Z_test_np = self.get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
+            X_test_np, Y_test_np, Z_test_np = get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
             X_test = torch.tensor(X_test_np, dtype=torch.float32, device=self.device)
             Y_test = torch.tensor(Y_test_np, dtype=torch.float32, device=self.device)
             Z_test = torch.tensor(Z_test_np, dtype=torch.float32, device=self.device)
@@ -594,7 +374,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             Y_test = None
             Z_test = None
         if use_replay_data and len(self.X_replay_list) > 0:
-            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay_np, Y_replay_np, Z_replay_np = get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
             X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
             Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
             Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
@@ -632,10 +412,10 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         self.models = [self.model]
     def get_updated_temp_model(self,learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100], use_replay_data=False, replay_data_rate=0.05,randomize_fix_lstm=0.0):
         self.temp_model = copy.deepcopy(self.model)
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         if use_replay_data and len(self.X_replay_list) > 0:
-            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay_np, Y_replay_np, Z_replay_np = get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
             X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
             Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
             Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
@@ -665,10 +445,10 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
     def relearn_temp_model(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100], randomize=0.001,plt_save_dir=None,save_path=None, use_replay_data=False, replay_data_rate=0.05,randomize_fix_lstm=0.0):
         self.temp_model.to(self.device)
         # Define Time Series Data
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         if len(self.X_test_list) > 0:
-            X_test_np, Y_test_np, Z_test_np = self.get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
+            X_test_np, Y_test_np, Z_test_np = get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
             X_test = torch.tensor(X_test_np, dtype=torch.float32, device=self.device)
             Y_test = torch.tensor(Y_test_np, dtype=torch.float32, device=self.device)
             Z_test = torch.tensor(Z_test_np, dtype=torch.float32, device=self.device)
@@ -677,7 +457,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             Y_test = None
             Z_test = None
         if use_replay_data and len(self.X_replay_list) > 0:
-            X_replay_np, Y_replay_np, Z_replay_np = self.get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
+            X_replay_np, Y_replay_np, Z_replay_np = get_sequence_data(self.X_replay_list, self.Y_replay_list, self.Z_replay_list,self.division_indices_replay)
             X_replay = torch.tensor(X_replay_np, dtype=torch.float32, device=self.device)
             Y_replay = torch.tensor(Y_replay_np, dtype=torch.float32, device=self.device)
             Z_replay = torch.tensor(Z_replay_np, dtype=torch.float32, device=self.device)
@@ -717,10 +497,10 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
     def get_trained_ensemble_models(self, learning_rates=[1e-3, 1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100], ensemble_size=5):
         print("state_component_predicted: ", state_component_predicted)
         # Define Time Series Data
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)    
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         self.model = error_prediction_NN.ErrorPredictionNN(
-            output_size=len(state_component_predicted_index), prediction_length=prediction_length
+            prediction_length=prediction_length, state_component_predicted=state_component_predicted
         ).to(self.device)
         print("______________________________")
         print("ensemble number: ", 0)
@@ -759,8 +539,8 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
     def update_saved_model(
         self, path, learning_rates=[1e-4, 1e-5, 1e-6], patience=10, batch_sizes=[100,10,100]
     ):
-        X_train_np, Y_train_np, Z_train_np = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
-        X_val_np, Y_val_np, Z_val_np = self.get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
+        X_train_np, Y_train_np, Z_train_np = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_val_np, Y_val_np, Z_val_np = get_sequence_data(self.X_val_list, self.Y_val_list, self.Z_val_list,self.division_indices_val)
         self.model = torch.load(path)
         self.model.to(self.device)
         self.train_model(
@@ -775,66 +555,37 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
             torch.tensor(Y_val_np, dtype=torch.float32, device=self.device),
             torch.tensor(Z_val_np, dtype=torch.float32, device=self.device),
         )
-    def get_sequence_data(self, X, Y, Z, division_indices, acc_threshold=2.0, steer_threshold=0.7, acc_change_threshold=3.5, steer_change_threshold=0.8, acc_change_window=10, steer_change_window=10):
-        X_seq = transform_to_sequence_data(
-            np.array(X),
-            past_length + prediction_length,
-            division_indices,
-            prediction_step,
-        )
-        Y_seq = transform_to_sequence_data(
-            np.array(Y)[:, state_component_predicted_index],
-            past_length + prediction_length,
-            division_indices,
-            prediction_step,
-        )
-        Z_seq = transform_to_sequence_data(
-            np.array(Z)[:, state_component_predicted_index],
-            (past_length + prediction_length) * prediction_step,
-            division_indices,
-            1,
-        )[:, past_length * prediction_step: (past_length + integration_length) * prediction_step + 1]
-        X_seq_filtered = []
-        Y_seq_filtered = []
-        Z_seq_filtered = []
-        for i in range(X_seq.shape[0]):
-            acc = X_seq[i, :, 1]
-            steer = X_seq[i, :, 2]
-            acc_input = X_seq[i, :, acc_input_indices_nom]
-            steer_input = X_seq[i, :, steer_input_indices_nom]
-            acc_change = (acc[acc_change_window:] - acc[:-acc_change_window]) / (acc_change_window * control_dt)
-            steer_change = (steer[steer_change_window:] - steer[:-steer_change_window]) / (steer_change_window * control_dt)
-            if (
-                (np.abs(acc).max() < acc_threshold) and
-                (np.abs(steer).max() < steer_threshold) and
-                (np.abs(acc_input).max() < acc_threshold) and
-                (np.abs(steer_input).max() < steer_threshold) and
-                (np.abs(acc_change).max() < acc_change_threshold) and
-                (np.abs(steer_change).max() < steer_change_threshold)
-            ):
-                X_seq_filtered.append(X_seq[i])
-                Y_seq_filtered.append(Y_seq[i])
-                Z_seq_filtered.append(Z_seq[i])
-        return np.array(X_seq_filtered), np.array(Y_seq_filtered), np.array(Z_seq_filtered)
 
     def save_model(self, path="vehicle_model.pth"):
         self.model.to("cpu")
         torch.save(self.model, path)
         save_dir = path.replace(".pth", "")
-        convert_model_to_csv.convert_model_to_csv(self.model, save_dir, state_component_predicted)
+        convert_model_to_csv.convert_model_to_csv(self.model, save_dir)
     def save_given_model(self, model, path="vehicle_model.pth"):
         model.to("cpu")
         torch.save(model, path)
         save_dir = path.replace(".pth", "")
-        convert_model_to_csv.convert_model_to_csv(model, save_dir, state_component_predicted)
+        convert_model_to_csv.convert_model_to_csv(model, save_dir)
     def save_ensemble_models(self, paths):
         for i in range(len(paths)):
             temp_model = self.models[i]
             temp_model.to("cpu")
             torch.save(temp_model, paths[i])
             save_dir = paths[i].replace(".pth", "")
-            convert_model_to_csv.convert_model_to_csv(temp_model, save_dir, state_component_predicted)
+            convert_model_to_csv.convert_model_to_csv(temp_model, save_dir)
     def fix_lstm(self,model,randomize=0.001,):
+        # freeze the encoder layers
+        for param in model.acc_encoder_layer_1.parameters():
+            param.requires_grad = False
+        for param in model.acc_encoder_layer_2.parameters():
+            param.requires_grad = False
+        for param in model.steer_encoder_layer_1.parameters():
+            param.requires_grad = False
+        for param in model.steer_encoder_layer_2.parameters():
+            param.requires_grad = False
+        for param in model.lstm_encoder.parameters():
+            param.requires_grad = False
+        # freeze shallow layers of the decoder
         for param in model.acc_layer_1.parameters():
             param.requires_grad = False
         for param in model.steer_layer_1.parameters():
@@ -864,7 +615,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         
 
     def extract_features_from_data(self,X,division_indices,window_size=10):
-        X_train_np, _, _ = self.get_sequence_data(X, self.Y_train_list, self.Z_train_list,division_indices)
+        X_train_np, _, _ = get_sequence_data(X, self.Y_train_list, self.Z_train_list,division_indices)
         X_extracted = []
         for i in range(X_train_np.shape[0]):
             X_tmp = X_train_np[i][past_length:past_length + window_size]
@@ -928,7 +679,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         if self.models is None:
             print("models are not trained")
             return
-        X_test_np, Y_test_np, _ = self.get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
+        X_test_np, Y_test_np, _ = get_sequence_data(self.X_test_list, self.Y_test_list, self.Z_test_list,self.division_indices_test)
         result_dict = {}
         nominal_prediction = []
         prediction = []
@@ -1190,7 +941,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
         lasso_alpha=1e-4
         max_cumulative_error = 0.1
         max_projection_dim = 10
-        X_train_np, Y_train_np, _ = self.get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
+        X_train_np, Y_train_np, _ = get_sequence_data(self.X_train_list, self.Y_train_list, self.Z_train_list,self.division_indices_train)
         X_train = torch.tensor(X_train_np, dtype=torch.float32, device=self.device)
         Y_train = torch.tensor(Y_train_np, dtype=torch.float32, device=self.device)
         num_batches = (X_train.size(0) + batch_size - 1) // batch_size
@@ -1303,6 +1054,7 @@ class train_error_prediction_NN(add_data_from_csv.add_data_from_csv):
                 else:
                     prediction_error += torch.mean(torch.abs(Y_batch[:,past_length:]),dim=(0,1)) * (end_idx - start_idx)
             prediction_error /= X.size(0)
+        print("prediction_error:", prediction_error)
         self.adaptive_weight = 1.0 / (prediction_error + 1e-4)
         for i in range(len(self.adaptive_weight)):
             if self.adaptive_weight[i] > torch.max(self.adaptive_weight[-2:]):

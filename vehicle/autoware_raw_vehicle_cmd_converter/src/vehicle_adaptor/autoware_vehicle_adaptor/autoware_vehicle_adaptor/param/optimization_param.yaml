@@ -132,4 +132,5 @@ optimization_parameter:
     autoware_alignment:
         use_controller_steer_input_schedule: true
         use_vehicle_adaptor: true
+        use_nonzero_initial_hidden: true
     

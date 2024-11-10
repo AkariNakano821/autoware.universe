@@ -4,6 +4,7 @@ from utils.data_collection_utils import ControlType
 import simplejson as json
 import os
 import random
+import gc
 
 iter_num = 100
 simulator = python_simulator.PythonSimulator()
@@ -13,7 +14,7 @@ if not os.path.isdir("log_data/nominal_test"):
     os.mkdir("log_data/nominal_test")
 base_dir = "log_data/nominal_test/"
 
-steer_dead_band_range = [0.0008, 0.003]
+steer_dead_band_range = [0.0008, 0.0018]
 accel_dead_band_range = [0.0, 0.03]
 brake_dead_band_range = [0.0, 0.03]
 accel_time_delay_range = [0.1, 0.5]
@@ -53,3 +54,4 @@ for i in range(iter_num):
     simulator.drive_sim(max_control_time = 120.0, save_dir = save_dir + "/slalom", course_csv_data = "slalom_course_data.csv")
     simulator.drive_sim(max_control_time = 200.0, save_dir = save_dir + "/mpc_eight", course_csv_data = "mpc_figure_eight_course_data.csv")
     simulator.drive_sim(max_control_time = 100.0, save_dir = save_dir + "/mpc_straight", course_csv_data = "mpc_straight_line_course_data.csv")
+    gc.collect()

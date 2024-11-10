@@ -339,6 +339,8 @@ class PythonSimulator:
         control_type: ControlType = ControlType.mpc,
         use_vehicle_adaptor=False,
         vehicle_adaptor_model_path="vehicle_model.pth",
+        use_nonzero_initial_hidden=False,
+        initial_hidden_dir="vehicle_model",
         states_ref_mode="predict_by_polynomial_regression",
         course_csv_data="slalom_course_data.csv", # "slalom_course_data.csv" or "mpc_figure_eight_course_data.csv"
         offline_data_dir=None,
@@ -377,6 +379,8 @@ class PythonSimulator:
         if use_vehicle_adaptor:
             self.vehicle_adaptor.clear_NN_params()
             self.set_NN_params(vehicle_adaptor_model_path)
+            if use_nonzero_initial_hidden:
+                self.set_attention_params(initial_hidden_dir)
             self.vehicle_adaptor.send_initialized_flag()
             self.vehicle_adaptor.unset_offline_data_set_for_compensation()
             self.vehicle_adaptor.unset_projection_matrix_for_compensation()
@@ -671,6 +675,7 @@ class PythonSimulator:
                 vehicle_model = torch.load(path)
                 load_dir = path.replace(".pth", "")
                 self.set_NN_params_from_model(vehicle_model, load_dir)
+    
     def set_offline_data_for_linear_compensation(self, csv_dir):
         XXT = np.loadtxt(csv_dir + "/XXT.csv", delimiter=",")
         YXT = np.loadtxt(csv_dir + "/YXT.csv", delimiter=",")
@@ -730,6 +735,9 @@ class PythonSimulator:
             vehicle_model.vel_bias,
             state_component_predicted,
         )
+    def set_attention_params(self, csv_dir):
+        self.vehicle_adaptor.set_attention_params_from_csv(csv_dir)
+        self.vehicle_adaptor.set_initial_memory_bank(csv_dir)
 
     def save_pp_eight_record(self, t_current,save_dir):
             t_current = math.ceil(t_current * 100 / 60) / 100

@@ -51,6 +51,32 @@ use_yaw_observation = bool(trained_model_param["trained_model_parameter"]["setti
 integrate_states = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_states"])
 integrate_vel = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_vel"])
 integrate_yaw = bool(trained_model_param["trained_model_parameter"]["setting"]["integrate_yaw"])
+if not add_vel_to_prediction:
+    integrate_vel = False
+if not add_yaw_to_prediction:
+    integrate_yaw = False
+
+state_component_predicted =[]
+state_component_predicted_index = []
+if add_position_to_prediction:
+    state_component_predicted.append("x")
+    state_component_predicted_index.append(0)
+    state_component_predicted.append("y")
+    state_component_predicted_index.append(1)
+if add_vel_to_prediction:
+    state_component_predicted.append("vel")
+    state_component_predicted_index.append(2)
+if add_yaw_to_prediction:
+    state_component_predicted.append("yaw")
+    state_component_predicted_index.append(3)
+state_component_predicted.append("acc")
+state_component_predicted_index.append(4)
+state_component_predicted.append("steer")
+state_component_predicted_index.append(5)
+state_name_to_predicted_index = {}
+for i in range(len(state_component_predicted)):
+    state_name_to_predicted_index[state_component_predicted[i]] = i
+
 optimization_param_path = (
     package_path["path"] + "/autoware_vehicle_adaptor/param/optimization_param.yaml"
 )

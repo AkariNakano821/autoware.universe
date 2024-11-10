@@ -9,7 +9,6 @@ prediction_step = 3
 class ErrorPredictionNN(nn.Module):
     def __init__(
         self,
-        output_size,
         prediction_length,
         num_layers_encoder=1,
         acc_hidden_sizes=(16, 8),
@@ -22,6 +21,7 @@ class ErrorPredictionNN(nn.Module):
         randomize=0.01,
         vel_scaling=1.0,
         vel_bias=0.0,
+        state_component_predicted=["vel","yaw","acc","steer"]
     ):
         super(ErrorPredictionNN, self).__init__()
         self.states_size = 3 # vel, acc, steer
@@ -33,7 +33,10 @@ class ErrorPredictionNN(nn.Module):
         self.lstm_hidden_size = lstm_hidden_size
         self.lstm_acc_hidden_size = lstm_acc_hidden_size
         self.lstm_steer_hidden_size = lstm_steer_hidden_size
+        self.lstm_hidden_total_size = lstm_hidden_size + lstm_acc_hidden_size + lstm_steer_hidden_size
         self.num_layers_encoder = num_layers_encoder
+        self.state_component_predicted = state_component_predicted
+        self.output_size = len(state_component_predicted)
         acc_input_indices = np.arange(self.states_size, self.states_size + acc_queue_size + prediction_step)
         steer_input_indices = np.arange(
             self.states_size + acc_queue_size + prediction_step, self.states_size + acc_queue_size + steer_queue_size + 2 * prediction_step
@@ -114,7 +117,7 @@ class ErrorPredictionNN(nn.Module):
         )
         nn.init.uniform_(self.linear_relu[0].weight, a=lb, b=ub)
         nn.init.uniform_(self.linear_relu[0].bias, a=lb, b=ub)
-        self.final_layer = nn.Linear(hidden_size, output_size)
+        self.final_layer = nn.Linear(hidden_size, self.output_size)
         nn.init.uniform_(self.final_layer.weight, a=lb, b=ub)
         nn.init.uniform_(self.final_layer.bias, a=lb, b=ub)
     def forward(self, x, previous_error=None, hc=None, mode="default"):

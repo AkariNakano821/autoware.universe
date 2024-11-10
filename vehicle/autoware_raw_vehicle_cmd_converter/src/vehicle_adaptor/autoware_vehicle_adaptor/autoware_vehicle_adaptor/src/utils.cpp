@@ -12,6 +12,9 @@
 #include <cmath>
 #include "utils.h"
 
+#include <cstdlib> // for rand() and srand()
+#include <ctime>   // for time()
+
 namespace py = pybind11;
 using namespace Proxima;
 
@@ -1808,6 +1811,10 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     steer_queue_size_ = trained_model_param_node["trained_model_parameter"]["queue_size"]["steer_queue_size"].as<int>();
     update_lstm_len_ = trained_model_param_node["trained_model_parameter"]["lstm"]["update_lstm_len"].as<int>();
 
+    prob_update_memory_bank_ = trained_model_param_node["trained_model_parameter"]["attention"]["prob_update_memory_bank"].as<double>();
+    memory_bank_size_ = trained_model_param_node["trained_model_parameter"]["attention"]["memory_bank_size"].as<int>();
+    memory_bank_element_len_ = trained_model_param_node["trained_model_parameter"]["attention"]["memory_bank_element_len"].as<int>();
+    
     YAML::Node controller_param_node = YAML::LoadFile(param_dir_path + "/controller_param.yaml");
 
     double acc_time_delay_controller = controller_param_node["controller_parameter"]["acceleration"]["acc_time_delay"].as<double>();
@@ -1885,6 +1892,7 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     }
     use_controller_steer_input_schedule_ = optimization_param_node["optimization_parameter"]["autoware_alignment"]["use_controller_steer_input_schedule"].as<bool>();
     use_vehicle_adaptor_ = optimization_param_node["optimization_parameter"]["autoware_alignment"]["use_vehicle_adaptor"].as<bool>();
+    use_nonzero_initial_hidden_autoware_ = optimization_param_node["optimization_parameter"]["autoware_alignment"]["use_nonzero_initial_hidden"].as<bool>();
 
     use_acc_input_schedule_prediction_ = optimization_param_node["optimization_parameter"]["inputs_schedule_prediction_NN"]["use_acc_input_schedule_prediction"].as<bool>();
     use_steer_input_schedule_prediction_ = optimization_param_node["optimization_parameter"]["inputs_schedule_prediction_NN"]["use_steer_input_schedule_prediction"].as<bool>();
@@ -1936,6 +1944,8 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     else{
       steer_input_ref_smoother_.set_prediction_len(steer_polynomial_prediction_len_);
     }
+
+    srand(static_cast<unsigned>(time(0)));
   }
   void VehicleAdaptor::set_NN_params(
     const Eigen::MatrixXd & weight_acc_encoder_layer_1, const Eigen::MatrixXd & weight_steer_encoder_layer_1,
@@ -1969,6 +1979,80 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     h_dim_ = weight_lstm_hh.cols();
     num_layers_encoder_ = weight_lstm_encoder_ih.size();
     NN_prediction_target_dim_ = state_component_predicted.size();
+  }
+  void VehicleAdaptor::set_attention_params(
+    const Eigen::MatrixXd & weight_initial_hidden_acc_layer_1, const Eigen::MatrixXd & weight_initial_hidden_steer_layer_1,
+    const Eigen::MatrixXd & weight_initial_hidden_acc_layer_2, const Eigen::MatrixXd & weight_initial_hidden_steer_layer_2,
+    const Eigen::MatrixXd & weight_initial_hidden_gru_ih, const Eigen::MatrixXd & weight_initial_hidden_gru_hh,
+    const Eigen::MatrixXd & initial_hidden_query, const Eigen::MatrixXd & weight_initial_hidden_key_layer,
+    const Eigen::MatrixXd & weight_initial_hidden_value_layer, const Eigen::MatrixXd & weight_initial_hidden_final_layer,
+    const Eigen::VectorXd & bias_initial_hidden_acc_layer_1, const Eigen::VectorXd & bias_initial_hidden_steer_layer_1,
+    const Eigen::VectorXd & bias_initial_hidden_acc_layer_2, const Eigen::VectorXd & bias_initial_hidden_steer_layer_2,
+    const Eigen::VectorXd & bias_initial_hidden_gru_ih, const Eigen::VectorXd & bias_initial_hidden_gru_hh,
+    const Eigen::VectorXd & bias_initial_hidden_value_layer, const Eigen::VectorXd & bias_initial_hidden_final_layer,
+    const int num_heads, const int key_size, const int value_size, const int mean_steps)
+  {
+    get_initial_hidden_.set_attention_params(
+      weight_initial_hidden_acc_layer_1, weight_initial_hidden_steer_layer_1,
+      weight_initial_hidden_acc_layer_2, weight_initial_hidden_steer_layer_2,
+      weight_initial_hidden_gru_ih, weight_initial_hidden_gru_hh,
+      initial_hidden_query, weight_initial_hidden_key_layer,
+      weight_initial_hidden_value_layer, weight_initial_hidden_final_layer,
+      bias_initial_hidden_acc_layer_1, bias_initial_hidden_steer_layer_1,
+      bias_initial_hidden_acc_layer_2, bias_initial_hidden_steer_layer_2,
+      bias_initial_hidden_gru_ih, bias_initial_hidden_gru_hh,
+      bias_initial_hidden_value_layer, bias_initial_hidden_final_layer,
+      num_heads, key_size, value_size, mean_steps);
+      use_nonzero_initial_hidden_ = true;
+  }
+  void VehicleAdaptor::set_initial_memory_bank(std::string csv_dir){
+    Eigen::MatrixXd initial_gru_bank = read_csv(csv_dir + "/gru_bank.csv");
+    get_initial_hidden_.initialize_attention_info();
+    for (int i = 0; i < initial_gru_bank.rows(); i++){
+      Eigen::VectorXd h_gru = initial_gru_bank.row(i).transpose();
+      get_initial_hidden_.add_weight_and_value(h_gru);
+    }
+    initialized_memory_bank_ = true;
+  }
+  void VehicleAdaptor::set_attention_params_from_csv(std::string csv_dir){
+    std::cout << "csv_dir: " << csv_dir << std::endl;
+    Eigen::VectorXd attention_info = read_csv(csv_dir + "/attention_info.csv").col(0);
+    Eigen::VectorXd gru_info = read_csv(csv_dir + "/gru_info.csv").col(0);
+    Eigen::MatrixXd weight_initial_hidden_acc_layer_1 = read_csv(csv_dir + "/weight_initial_hidden_acc_layer_1.csv");
+    Eigen::MatrixXd weight_initial_hidden_steer_layer_1 = read_csv(csv_dir + "/weight_initial_hidden_steer_layer_1.csv");
+    Eigen::MatrixXd weight_initial_hidden_acc_layer_2 = read_csv(csv_dir + "/weight_initial_hidden_acc_layer_2.csv");
+    Eigen::MatrixXd weight_initial_hidden_steer_layer_2 = read_csv(csv_dir + "/weight_initial_hidden_steer_layer_2.csv");
+    Eigen::MatrixXd weight_initial_hidden_gru_ih = read_csv(csv_dir + "/weight_initial_hidden_gru_ih.csv");
+    Eigen::MatrixXd weight_initial_hidden_gru_hh = read_csv(csv_dir + "/weight_initial_hidden_gru_hh.csv");
+    Eigen::MatrixXd initial_hidden_query = read_csv(csv_dir + "/initial_hidden_query.csv");
+    Eigen::MatrixXd weight_initial_hidden_key_layer = read_csv(csv_dir + "/weight_initial_hidden_key_layer.csv");
+    Eigen::MatrixXd weight_initial_hidden_value_layer = read_csv(csv_dir + "/weight_initial_hidden_value_layer.csv");
+    Eigen::MatrixXd weight_initial_hidden_final_layer = read_csv(csv_dir + "/weight_initial_hidden_final_layer.csv");
+
+    Eigen::VectorXd bias_initial_hidden_acc_layer_1 = read_csv(csv_dir + "/bias_initial_hidden_acc_layer_1.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_steer_layer_1 = read_csv(csv_dir + "/bias_initial_hidden_steer_layer_1.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_acc_layer_2 = read_csv(csv_dir + "/bias_initial_hidden_acc_layer_2.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_steer_layer_2 = read_csv(csv_dir + "/bias_initial_hidden_steer_layer_2.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_gru_ih = read_csv(csv_dir + "/bias_initial_hidden_gru_ih.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_gru_hh = read_csv(csv_dir + "/bias_initial_hidden_gru_hh.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_value_layer = read_csv(csv_dir + "/bias_initial_hidden_value_layer.csv").col(0);
+    Eigen::VectorXd bias_initial_hidden_final_layer = read_csv(csv_dir + "/bias_initial_hidden_final_layer.csv").col(0);
+
+    int num_heads = attention_info(0);
+    int key_size = attention_info(1);
+    int value_size = attention_info(2);
+    int mean_steps = gru_info(0);
+    set_attention_params(
+      weight_initial_hidden_acc_layer_1, weight_initial_hidden_steer_layer_1,
+      weight_initial_hidden_acc_layer_2, weight_initial_hidden_steer_layer_2,
+      weight_initial_hidden_gru_ih, weight_initial_hidden_gru_hh,
+      initial_hidden_query, weight_initial_hidden_key_layer,
+      weight_initial_hidden_value_layer, weight_initial_hidden_final_layer,
+      bias_initial_hidden_acc_layer_1, bias_initial_hidden_steer_layer_1,
+      bias_initial_hidden_acc_layer_2, bias_initial_hidden_steer_layer_2,
+      bias_initial_hidden_gru_ih, bias_initial_hidden_gru_hh,
+      bias_initial_hidden_value_layer, bias_initial_hidden_final_layer,
+      num_heads, key_size, value_size, mean_steps);
   }
   void VehicleAdaptor::set_NN_params_from_csv(std::string csv_dir){
     // Eigen::MatrixXd weight_acc_layer_1, weight_steer_layer_1, weight_acc_layer_2, weight_steer_layer_2, weight_lstm_ih, weight_lstm_hh, weight_complimentary_layer, weight_linear_relu, weight_final_layer;
@@ -2299,6 +2383,41 @@ double PolynomialFilter::fit_transform(double timestamp, double sample)
     Eigen::VectorXd c_lstm_compensation = Eigen::VectorXd::Zero(h_dim_full_);
     Eigen::Vector2d acc_steer_error = Eigen::Vector2d::Zero();
     Eigen::VectorXd previous_error_compensator = Eigen::VectorXd::Zero(previous_error_.size());
+
+
+    if (use_nonzero_initial_hidden_)
+    {
+      double random_value = (double)rand() / RAND_MAX;
+      if (random_value < prob_update_memory_bank_)
+      {
+        get_initial_hidden_.erase_attention_info_begin();
+        get_initial_hidden_.initialize_x_queue();
+        for (int i = 0; i < memory_bank_element_len_; i++)
+        {
+          Eigen::VectorXd states_tmp = state_history_lstm_[predict_step_ * (update_lstm_len_ - memory_bank_element_len_ + i)];
+          Eigen::VectorXd acc_input_history_concat = Eigen::VectorXd::Zero(acc_queue_size_ + predict_step_);
+          Eigen::VectorXd steer_input_history_concat = Eigen::VectorXd::Zero(steer_queue_size_ + predict_step_);
+          acc_input_history_concat.head(acc_queue_size_) = acc_input_history_lstm_[predict_step_ * (update_lstm_len_ - memory_bank_element_len_ + i)];
+          steer_input_history_concat.head(steer_queue_size_) = steer_input_history_lstm_[predict_step_ * (update_lstm_len_ - memory_bank_element_len_ + i)];
+
+          for (int j = 0; j < predict_step_; j++) {
+            acc_input_history_concat[acc_queue_size_ + j] = acc_input_history_lstm_[predict_step_*(update_lstm_len_ - memory_bank_element_len_ + i) + j + 1][acc_queue_size_ - 1];
+            steer_input_history_concat[steer_queue_size_ + j] = steer_input_history_lstm_[predict_step_*(update_lstm_len_ - memory_bank_element_len_ + i) + j + 1][steer_queue_size_ - 1];
+          }
+          Eigen::VectorXd NN_input = Eigen::VectorXd::Zero(3 + acc_queue_size_ + steer_queue_size_+2*predict_step_);
+          NN_input << states_tmp[vel_index_], states_tmp[acc_index_], states_tmp[steer_index_],
+            acc_input_history_concat, steer_input_history_concat;
+          get_initial_hidden_.update_x_queue(NN_input);
+        }
+        get_initial_hidden_.update_attention_info();
+      }
+      Eigen::VectorXd initial_hidden = get_initial_hidden_.get_initial_hidden();
+      h_lstm = initial_hidden.head(h_dim_full_);
+      c_lstm = initial_hidden.tail(h_dim_full_);
+
+    }
+
+
     for (int i = 0; i<update_lstm_len_; i++) {
 
       Eigen::VectorXd states_tmp = state_history_lstm_[predict_step_*i];
@@ -2684,6 +2803,8 @@ PYBIND11_MODULE(utils, m)
     .def(py::init())
     .def("set_NN_params", &VehicleAdaptor::set_NN_params)
     .def("set_NN_params_from_csv", &VehicleAdaptor::set_NN_params_from_csv)
+    .def("set_attention_params_from_csv", &VehicleAdaptor::set_attention_params_from_csv)
+    .def("set_initial_memory_bank", &VehicleAdaptor::set_initial_memory_bank)
     .def("set_offline_data_set_for_compensation", &VehicleAdaptor::set_offline_data_set_for_compensation)
     .def("set_offline_data_set_for_compensation_from_csv", &VehicleAdaptor::set_offline_data_set_for_compensation_from_csv)
     .def("unset_offline_data_set_for_compensation", &VehicleAdaptor::unset_offline_data_set_for_compensation)
