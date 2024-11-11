@@ -931,6 +931,9 @@ SlotOutput SubPlannerManager::propagateFull(
     is_failed_approved_slot =
       is_failed_approved_slot || approved_module_result.is_upstream_failed_approved;
 
+    std::cout << "Deleted module is: ";
+    for (const auto & deleted : deleted_modules) std::cout << deleted->name() << ", ";
+    std::cout << std::endl;
     const auto request_modules = getRequestModules(approved_module_output, deleted_modules);
     if (request_modules.empty()) {
       // there is no module that needs to be launched
