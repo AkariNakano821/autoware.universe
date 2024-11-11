@@ -23,7 +23,7 @@ KinematicsAdtModel::KinematicsAdtModel(
   const double steer_tau)
 : VehicleModelInterface(
     /* dim_x */ 3, /* dim_u */ 1, /* dim_y */ 2, front_wheelbase + rear_wheelbase),
-  m_wheelbase_diff(front_wheelbase - rear_wheelbase),
+  m_wheelbase_diff(rear_wheelbase - front_wheelbase),
   m_wheelbase_squared_diff(rear_wheelbase * rear_wheelbase - front_wheelbase * front_wheelbase)
 {
   m_front_wheelbase = front_wheelbase;
@@ -52,19 +52,18 @@ void KinematicsAdtModel::calculateDiscreteMatrix(
     velocity = 1e-04 * (m_velocity >= 0 ? 1 : -1);
   }
 
-  const double front_wheelbase_c_rear_wheelbase_inv =
-    1.0 / (m_front_wheelbase + m_rear_wheelbase * cos(delta_r));
+  const double pseudo_wheelbase_inv = 1.0 / (m_front_wheelbase * cos(delta_r) + m_rear_wheelbase);
 
-  const double turning_velocity = velocity * sin(delta_r) * front_wheelbase_c_rear_wheelbase_inv;
-  const double pd_turning_velocity =
-    velocity * (m_front_wheelbase * cos(delta_r) + m_rear_wheelbase) *
-    front_wheelbase_c_rear_wheelbase_inv * front_wheelbase_c_rear_wheelbase_inv;
+  const double turning_velocity = velocity * sin(delta_r) * pseudo_wheelbase_inv;
+  const double pd_turning_velocity = velocity *
+                                     (m_front_wheelbase + m_rear_wheelbase * cos(delta_r)) *
+                                     pseudo_wheelbase_inv * pseudo_wheelbase_inv;
 
   a_d << 0.0, velocity, 0.0, 0.0, 0.0, pd_turning_velocity, 0.0, 0.0, -1.0 / m_steer_tau;
 
   b_d << 0.0, 0.0, 1.0 / m_steer_tau;
 
-  c_d << 1.0, 0.0, 0.0, 0.0, 1.0, 0.0;
+  c_d << 1.0, 0.0, 0.0, 0.0, 1.0, -1.0;
 
   w_d << 0.0, -velocity * m_curvature + turning_velocity - pd_turning_velocity * delta_r, 0.0;
 
@@ -79,7 +78,11 @@ void KinematicsAdtModel::calculateDiscreteMatrix(
 
 void KinematicsAdtModel::calculateReferenceInput(Eigen::MatrixXd & u_ref)
 {
-  u_ref(0, 0) = std::atan(m_wheelbase * m_curvature);
+  // const double curvature_squared = m_curvature * m_curvature;
+  u_ref(0, 0) = 0.0;
+  // u_ref(0, 0) = 2.0 * std::atan(
+  //                       (1.0 - std::sqrt(m_wheelbase_squared_diff * curvature_squared + 1.0)) /
+  //                       (m_wheelbase_diff * m_curvature));
 }
 
 MPCTrajectory KinematicsAdtModel::calculatePredictedTrajectoryInWorldCoordinate(

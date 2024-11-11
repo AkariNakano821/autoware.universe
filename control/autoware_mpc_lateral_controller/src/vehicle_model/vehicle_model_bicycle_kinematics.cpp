@@ -48,7 +48,7 @@ void KinematicsBicycleModel::calculateDiscreteMatrix(
 
   b_d << 0.0, 0.0, 1.0 / m_steer_tau;
 
-  c_d << 1.0, 0.0, 0.0, 0.0, 1.0, 0.0;
+  c_d << 1.0, 0.0, 0.0, 0.0, 1.0, -1.0;
 
   w_d << 0.0,
     -velocity * m_curvature +
