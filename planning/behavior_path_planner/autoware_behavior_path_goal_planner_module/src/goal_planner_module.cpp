@@ -2368,10 +2368,10 @@ std::pair<bool, bool> GoalPlannerModule::isSafePath(
   const std::shared_ptr<ObjectsFilteringParams> & objects_filtering_params,
   const std::shared_ptr<SafetyCheckParams> & safety_check_params) const
 {
-  if (!thread_safe_data_.get_pull_over_path()) {
+  const auto pull_over_path = thread_safe_data_.get_pull_over_path();
+  if (!pull_over_path) {
     return {false, false};
   }
-  const auto pull_over_path = thread_safe_data_.get_pull_over_path()->getCurrentPath();
   const auto & current_pose = planner_data->self_odometry->pose.pose;
   const double current_velocity = std::hypot(
     planner_data->self_odometry->twist.twist.linear.x,
@@ -2384,11 +2384,9 @@ std::pair<bool, bool> GoalPlannerModule::isSafePath(
   const auto pull_over_lanes = goal_planner_utils::getPullOverLanes(
     *route_handler, left_side_parking_, parameters.backward_goal_search_length,
     parameters.forward_goal_search_length);
-  const size_t ego_seg_idx = planner_data->findEgoSegmentIndex(pull_over_path.points);
   const std::pair<double, double> terminal_velocity_and_accel =
     utils::parking_departure::getPairsTerminalVelocityAndAccel(
-      thread_safe_data_.get_pull_over_path()->pairs_terminal_velocity_and_accel,
-      thread_safe_data_.get_pull_over_path()->path_idx);
+      pull_over_path->pairs_terminal_velocity_and_accel, pull_over_path->path_idx);
   RCLCPP_DEBUG(
     getLogger(), "pairs_terminal_velocity_and_accel for goal_planner: %f, %f",
     terminal_velocity_and_accel.first, terminal_velocity_and_accel.second);
@@ -2397,10 +2395,11 @@ std::pair<bool, bool> GoalPlannerModule::isSafePath(
   // TODO(Sugahara): shoule judge is_object_front properly
   const bool is_object_front = true;
   const bool limit_to_max_velocity = true;
+  const auto parking_path = pull_over_path->getParkingPath();
   const auto ego_predicted_path =
     autoware::behavior_path_planner::utils::path_safety_checker::createPredictedPath(
-      ego_predicted_path_params, pull_over_path.points, current_pose, current_velocity, ego_seg_idx,
-      is_object_front, limit_to_max_velocity);
+      ego_predicted_path_params, parking_path.points, pull_over_path->start_pose, current_velocity,
+      0, is_object_front, limit_to_max_velocity);
 
   // ==========================================================================================
   // if ego is before the entry of pull_over_lanes, the beginning of the safety check area
@@ -2429,8 +2428,9 @@ std::pair<bool, bool> GoalPlannerModule::isSafePath(
     first_road_pose.position = first_road_point;
     first_road_pose.orientation = autoware::universe_utils::createQuaternionFromYaw(lane_yaw);
     // if current ego pose is before pull over lanes segment, use first road lanelet center pose
+    const auto & current_path = pull_over_path->getCurrentPath();
     if (
-      calcSignedArcLength(pull_over_path.points, first_road_pose.position, current_pose.position) <
+      calcSignedArcLength(current_path.points, first_road_pose.position, current_pose.position) <
       0.0) {
       return first_road_pose;
     }
@@ -2459,7 +2459,7 @@ std::pair<bool, bool> GoalPlannerModule::isSafePath(
   const bool current_is_safe = std::invoke([&]() {
     if (parameters.safety_check_params.method == "RSS") {
       return autoware::behavior_path_planner::utils::path_safety_checker::checkSafetyWithRSS(
-        pull_over_path, ego_predicted_path, filtered_objects, collision_check,
+        parking_path, ego_predicted_path, filtered_objects, collision_check,
         planner_data->parameters, safety_check_params->rss_params,
         objects_filtering_params->use_all_predicted_path, hysteresis_factor,
         safety_check_params->collision_check_yaw_diff_threshold);

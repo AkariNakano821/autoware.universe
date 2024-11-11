@@ -547,7 +547,7 @@ bool checkSafetyWithIntegralPredictedPolygon(
     CollisionCheckDebugPair debug_pair = createObjectDebug(object);
     for (const auto & path : object.predicted_paths) {
       for (const auto & pose_with_poly : path.path) {
-        if (boost::geometry::overlaps(ego_integral_polygon, pose_with_poly.poly)) {
+        if (boost::geometry::intersects(ego_integral_polygon, pose_with_poly.poly)) {
           debug_pair.second.ego_predicted_path = ego_predicted_path;  // raw path
           debug_pair.second.obj_predicted_path = path.path;           // raw path
           debug_pair.second.extended_obj_polygon = pose_with_poly.poly;
