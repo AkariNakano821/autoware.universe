@@ -1,0 +1,11 @@
+<launch>
+  <arg name="input_steering_report_topic" default="/vehicle/status/steering_status" />
+  <arg name="output_polygon_topic" default="~/debug/rear_footprint" />
+
+  <node pkg="articulate_model_rear_footprint_publisher"
+    name="articulate_model_rear_footprint_publisher"
+    exec="articulate_model_rear_footprint_publisher_exe" output="screen">
+    <remap from="~/input/steering_report" to="$(var input_steering_report_topic)" />
+    <remap from="~/output/polygon" to="$(var output_polygon_topic)" />
+  </node>
+</launch>
