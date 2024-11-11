@@ -423,6 +423,9 @@ std::vector<SceneModulePtr> SubPlannerManager::getRequestModules(
     BOOST_SCOPE_EXIT((&manager_ptr)(&processing_time_)(&stop_watch))
     {
       processing_time_.at(manager_ptr->name()) += stop_watch.toc(manager_ptr->name(), true);
+      if (manager_ptr->name() == "static_obstacle_avoidance")
+        std::cout << "Time in getRequestModule is: " << processing_time_.at(manager_ptr->name())
+                  << std::endl;
     }
     BOOST_SCOPE_EXIT_END;
 
@@ -658,6 +661,8 @@ std::pair<SceneModulePtr, BehaviorModuleOutput> SubPlannerManager::runRequestMod
         std::weak_ptr<SceneModuleInterface>(module_ptr), previous_module_output);
     }
 
+    if (module_ptr->name() == "static_obstacle_avoidance")
+      std::cout << "Calling run inside SubPlannerManager::runRequestModules" << std::endl;
     results.emplace(module_ptr->name(), run(module_ptr, data, previous_module_output));
   }
 
@@ -737,9 +742,16 @@ BehaviorModuleOutput SubPlannerManager::run(
   const BehaviorModuleOutput & previous_module_output) const
 {
   StopWatch<std::chrono::milliseconds> stop_watch;
+  bool is_soa = module_ptr->name() == "static_obstacle_avoidance";
+
+  if (is_soa)
+    std::cout << "Time before subplanner manager run function is: "
+              << processing_time_.at(module_ptr->name()) << std::endl;
+
   stop_watch.tic(module_ptr->name());
 
   module_ptr->setData(planner_data);
+
   module_ptr->setPreviousModuleOutput(previous_module_output);
 
   module_ptr->lockRTCCommand();
@@ -755,6 +767,9 @@ BehaviorModuleOutput SubPlannerManager::run(
   module_ptr->publishObjectsOfInterestMarker();
 
   processing_time_.at(module_ptr->name()) += stop_watch.toc(module_ptr->name(), true);
+  if (is_soa)
+    std::cout << "Time after subplanner run function is: "
+              << processing_time_.at(module_ptr->name()) << std::endl;
   return result;
 }
 
@@ -783,6 +798,8 @@ SlotOutput SubPlannerManager::runApprovedModules(
    * bootstrap approved module output
    */
   std::for_each(approved_module_ptrs_.begin(), approved_module_ptrs_.end(), [&](const auto & m) {
+    if (m->name() == "static_obstacle_avoidance")
+      std::cout << "run called inside SubPlannerManager::runApprovedModules" << std::endl;
     output = run(m, data, output);
     results.emplace(m->name(), output);
   });
@@ -895,6 +912,15 @@ SlotOutput SubPlannerManager::propagateFull(
 
   std::vector<SceneModulePtr> deleted_modules;
   for (size_t itr_num = 0; itr_num < max_iteration_num; ++itr_num) {
+    std::cout << "Iteration number is " << itr_num << std::endl;
+    std::cout << "Approved module is: ";
+    for (const auto & approved : approved_module_ptrs_) std::cout << approved->name() << ", ";
+    std::cout << std::endl;
+
+    std::cout << "Candidate module is: ";
+    for (const auto & candidate : candidate_module_ptrs_) std::cout << candidate->name() << ", ";
+    std::cout << std::endl;
+
     const auto approved_module_result = runApprovedModules(data, previous_slot_output.valid_output);
     const auto & approved_module_output = approved_module_result.valid_output;
 
@@ -912,6 +938,10 @@ SlotOutput SubPlannerManager::propagateFull(
         approved_module_output, isAnyCandidateExclusive(), is_failed_approved_slot,
         is_waiting_approved_slot};
     }
+
+    std::cout << "Request module is: ";
+    for (const auto & request : request_modules) std::cout << request->name() << ", ";
+    std::cout << std::endl;
 
     const auto [highest_priority_module, candidate_module_output] =
       runRequestModules(request_modules, data, approved_module_output);
@@ -932,6 +962,8 @@ SlotOutput SubPlannerManager::propagateFull(
 
     output_path = candidate_module_output;
     addApprovedModule(highest_priority_module);
+    if (highest_priority_module)
+      std::cout << "Highest priority module is " << highest_priority_module->name() << std::endl;
     clearCandidateModules();
   }
 

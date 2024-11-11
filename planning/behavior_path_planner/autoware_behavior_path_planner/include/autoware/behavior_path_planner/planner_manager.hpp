@@ -281,6 +281,7 @@ private:
   void clearCandidateModules()
   {
     std::for_each(candidate_module_ptrs_.begin(), candidate_module_ptrs_.end(), [this](auto & m) {
+      std::cout << "Deleting " << m->name() << std::endl;
       deleteExpiredModules(m);
     });
     candidate_module_ptrs_.clear();
