@@ -185,7 +185,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
     shift_end_road_to_target_distance, lateral_jerk, pull_over_velocity);
   const double before_shifted_pull_over_distance = calcBeforeShiftedArcLength(
     processed_prev_module_path.value(), pull_over_distance, shift_end_road_to_target_distance);
-  const auto shift_start_pose = calcLongitudinalOffsetPose(
+  const auto shift_start_pose = autoware::motion_utils::calcLongitudinalOffsetPose(
     processed_prev_module_path->points, shift_end_pose_prev_module_path.position,
     -before_shifted_pull_over_distance);
 
